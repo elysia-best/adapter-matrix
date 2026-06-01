@@ -180,6 +180,8 @@ class Adapter(BaseAdapter, HandleMixin):
         *,
         room_id: str,
     ) -> None:
+        if self._is_old_event(bot, raw):
+            return
         if (
             raw.sender == bot.user_id
             and not self.matrix_config.matrix_handle_self_message
@@ -188,6 +190,13 @@ class Adapter(BaseAdapter, HandleMixin):
         to_me = self._is_to_me(bot, raw, room_id=room_id)
         event = event_from_raw(raw, room_id=room_id, to_me=to_me)
         await bot.handle_event(event)
+
+    def _is_old_event(self, bot: Bot, raw: RawMatrixEvent) -> bool:
+        return (
+            not self.matrix_config.matrix_handle_old_events
+            and raw.origin_server_ts is not None
+            and raw.origin_server_ts < bot.startup_time_ms
+        )
 
     def _is_to_me(self, bot: Bot, raw: RawMatrixEvent, *, room_id: str) -> bool:
         if room_id in bot.direct_rooms:

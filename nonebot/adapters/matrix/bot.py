@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from time import time
 from typing import TYPE_CHECKING, Any
 from typing_extensions import override
 from uuid import uuid4
@@ -43,6 +44,7 @@ class Bot(BaseBot, ApiClient):
         self._bot_info = bot_info
         self._self_info = self_info
         self.next_batch: str | None = None
+        self.startup_time_ms = int(time() * 1000)
         self.direct_rooms: set[str] = set()
 
     @override

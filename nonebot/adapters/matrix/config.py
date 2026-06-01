@@ -18,4 +18,5 @@ class Config(BaseModel):
     matrix_sync_timeout: int = 30000
     matrix_retry_interval: float = 3.0
     matrix_handle_self_message: bool = False
+    matrix_handle_old_events: bool = False
     matrix_proxy: str | None = None

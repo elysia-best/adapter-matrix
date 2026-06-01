@@ -55,6 +55,7 @@ MATRIX_API_TIMEOUT=30.0
 MATRIX_SYNC_TIMEOUT=30000
 MATRIX_RETRY_INTERVAL=3.0
 MATRIX_HANDLE_SELF_MESSAGE=false
+MATRIX_HANDLE_OLD_EVENTS=false
 MATRIX_PROXY='http://127.0.0.1:7890'
 ```
 
@@ -62,6 +63,7 @@ MATRIX_PROXY='http://127.0.0.1:7890'
 - `MATRIX_SYNC_TIMEOUT`：`/sync` long-poll 超时时间，单位毫秒。
 - `MATRIX_RETRY_INTERVAL`：网络错误后的重试间隔，单位秒。
 - `MATRIX_HANDLE_SELF_MESSAGE`：是否处理机器人自己发送的消息。
+- `MATRIX_HANDLE_OLD_EVENTS`：是否处理早于本次启动时间的旧事件，默认丢弃旧事件。
 - `MATRIX_PROXY`：可选 HTTP 代理。
 
 ## 插件示例
@@ -131,4 +133,4 @@ await bot.redact(event.room_id, event.event_id, reason="handled")
 - 支持发送 `m.room.message`、上传媒体、reaction、redaction、typing 和 receipt。
 - 不包含端到端加密房间支持。
 - 不包含 Matrix Application Service API。
-- 不持久化 `/sync` 的 `next_batch`；进程内重连会复用内存状态，跨进程恢复可后续扩展。
+- 不持久化 `/sync` 的 `next_batch`；进程内重连会复用内存状态，跨进程重启默认丢弃早于本次启动时间的旧事件。
