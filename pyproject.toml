@@ -1,0 +1,172 @@
+#:schema https://json.schemastore.org/pyproject.json
+
+[project]
+name = "nonebot-adapter-matrix"
+version = "0.1.0"
+description = "Matrix adapter for nonebot2"
+authors = [
+    { name = "CMHopeSunshine", email = "277073121@qq.com" },
+    { name = "yanyongyu", email = "yyy@nonebot.dev" },
+    { name = "scdhh", email = "wallfjjd@gmail.com" },
+]
+license = "MIT"
+readme = "README.md"
+keywords = ["nonebot", "matrix", "bot"]
+requires-python = ">=3.10,<4.0.0"
+dependencies = ["nonebot2>=2.4.4"]
+
+[dependency-groups]
+dev = [
+    { include-group = "test" },
+    { include-group = "scripts" },
+    "ruff>=0.15.0,<1.0.0",
+    "nonemoji>=0.1.2,<0.2.0",
+    "pre-commit>=4.5.0,<5.0.0",
+    "pyright>=1.1.409",
+]
+scripts = ["loguru>=0.7.3", "rich>=14.3.3", "richuru>=0.1.1"]
+test = [
+    "nonebug>=0.4.0,<0.5.0",
+    "pytest>=7.0.0,<10.0.0",
+    "pytest-asyncio>=1.1.0,<2.0.0",
+    "pytest-cov>=7.0.0",
+]
+
+[project.urls]
+homepage = "https://github.com/nonebot/adapter-matrix"
+repository = "https://github.com/nonebot/adapter-matrix"
+documentation = "https://github.com/nonebot/adapter-matrix"
+
+[tool.uv.build-backend]
+module-name = "nonebot.adapters.matrix"
+module-root = ""
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "ERA",   # eradicate
+    "YTT",   # flake8-2020
+    "ANN",   # flake8-annotations
+    "ASYNC", # flake8-async
+    "S",     # flake8-bandit
+    "BLE",   # flake8-blind-except
+    "FBT",   # flake8-boolean-trap
+    "B",     # flake8-bugbear
+    "A",     # flake8-builtins
+    "COM",   # flake8-commas
+    "C4",    # flake8-comprehensions
+    "DTZ",   # flake8-datetimez
+    "T10",   # flake8-debugger
+    "EM",    # flake8-errmsg
+    "FA",    # flake8-future-annotations
+    "ISC",   # flake8-implicit-str-concat
+    "ICN",   # flake8-import-conventions
+    "PIE",   # flake8-pie
+    "T20",   # flake8-print
+    "PYI",   # flake8-pyi
+    "PT",    # flake8-pytest-style
+    "Q",     # flake8-quotes
+    "RSE",   # flake8-raise
+    "RET",   # flake8-return
+    "SLF",   # flake8-self
+    "SIM",   # flake8-simplify
+    "SLOT",  # flake8-slots
+    "TID",   # flake8-tidy-imports
+    "TC",    # flake8-type-checking
+    "ARG",   # flake8-unused-arguments
+    "PTH",   # flake8-use-pathlib
+    "FLY",   # flynt
+    "I",     # isort
+    "C90",   # mccabe
+    "N",     # PEP8-naming
+    "PERF",  # Perflint
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "PGH",   # pygrep-hooks
+    "PL",    # pylint
+    "UP",    # pyupgrade
+    "FURB",  # refurb
+    "RUF",   # Ruff-specific rules
+    "TRY",   # tryceratops
+]
+ignore = [
+    "COM812", # 强制尾随逗号
+    "E501",   # 过长的行由 ruff format 处理, 剩余的都是字符串
+    "PYI021", # docstring-in-stub
+    "TID252", # 相对导入
+    "W191",   # tab-indentation 由 ruff format 处理
+    "TC001",  # 避免依赖注入问题
+    "TC002",  # 避免依赖注入问题
+    "TC003",  # 避免依赖注入问题
+    "FA100",  # future-rewritable-type-annotation
+    "BLE001", # blind-except
+]
+
+flake8-quotes = { inline-quotes = "double", multiline-quotes = "double" }
+
+[tool.ruff.lint.extend-per-file-ignores]
+"tests/*" = [
+    "S101",    # assert
+    "PLR2004", # magic-value-comparison
+]
+"nonebot/adapters/matrix/api/client.pyi" = [
+    "A002", # Matrix API fields include names such as type and filter
+]
+
+[tool.ruff.lint.isort]
+force-sort-within-sections = true
+extra-standard-library = ["typing_extensions"]
+combine-as-imports = true
+order-by-type = true
+relative-imports-order = "closest-to-furthest"
+section-order = [
+    "future",
+    "standard-library",
+    "first-party",
+    "third-party",
+    "local-folder",
+]
+
+[tool.pyright]
+pythonVersion = "3.10"
+pythonPlatform = "All"
+defineConstant = { PYDANTIC_V2 = true }
+typeCheckingMode = "standard"
+include = ["nonebot/adapters/matrix"]
+reportUnnecessaryTypeIgnoreComment = 'error'
+reportImplicitOverride = 'error'
+reportUnnecessaryComparison = 'error'
+enableTypeIgnoreComments = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.bumpversion]
+current_version = "0.1.0"
+parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
+serialize = ["{major}.{minor}.{patch}"]
+search = "{current_version}"
+replace = "{new_version}"
+regex = false
+ignore_missing_version = false
+ignore_missing_files = false
+tag = true
+sign_tags = true
+tag_name = "v{new_version}"
+tag_message = "🔖 bump version {new_version}"
+allow_dirty = true
+commit = true
+message = "🔖 bump version {new_version}"
+moveable_tags = []
+commit_args = ""
+setup_hooks = []
+pre_commit_hooks = []
+post_commit_hooks = []
+
+[build-system]
+requires = ["uv_build>=0.9.18,<0.10.0"]
+build-backend = "uv_build"
