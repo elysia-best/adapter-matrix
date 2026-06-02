@@ -2,7 +2,7 @@
 
 [project]
 name = "nonebot-adapter-matrix"
-version = "0.1.1"
+version = "0.2.0"
 description = "Matrix adapter for nonebot2"
 authors = [
     { name = "CMHopeSunshine", email = "277073121@qq.com" },
@@ -13,7 +13,10 @@ license = "MIT"
 readme = "README.md"
 keywords = ["nonebot", "matrix", "bot"]
 requires-python = ">=3.10,<4.0.0"
-dependencies = ["nonebot2>=2.4.4"]
+dependencies = [
+    "nonebot2>=2.4.4",
+    "requests-oauth2client>=1.8.0",
+]
 
 [dependency-groups]
 dev = [
@@ -23,6 +26,7 @@ dev = [
     "nonemoji>=0.1.2,<0.2.0",
     "pre-commit>=4.5.0,<5.0.0",
     "pyright>=1.1.409",
+    "isort>=8.0.1",
 ]
 scripts = ["loguru>=0.7.3", "rich>=14.3.3", "richuru>=0.1.1"]
 test = [

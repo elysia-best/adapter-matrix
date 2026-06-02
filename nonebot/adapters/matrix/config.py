@@ -6,10 +6,34 @@ from pydantic import BaseModel, Field
 class BotInfo(BaseModel):
     homeserver: str
     access_token: str
+    refresh_token: str | None = None
+    access_token_expires_at_ms: int | None = None
+    refresh_before_expiry_ms: int = 60000
     user_id: str | None = None
     device_id: str | None = None
     sync_filter: str | dict[str, Any] | None = None
     set_presence: Literal["online", "offline", "unavailable"] | None = None
+
+    # Traditional Matrix login credentials
+    login_user: str | None = None
+    login_password: str | None = None
+    login_initial_device_display_name: str | None = None
+
+    # OAuth2
+    oauth_enabled: bool = False
+    oauth_server_url: str | None = None  # e.g. https://account.matrix.org
+    oauth_metadata_url: str | None = None
+    oauth_client_id: str | None = None
+    oauth_client_uri: str | None = None
+    oauth_redirect_uri: str | None = None
+    oauth_scope: str | None = None
+    oauth_device_id: str | None = None
+    oauth_open_browser: bool = False
+    oauth_callback_timeout: float = 300.0
+
+    # Runtime / persisted field
+    session_type: str | None = None  # "legacy_login" | "oauth2" | None
+    oauth_token_endpoint: str | None = None  # persisted for OAuth2 refresh
 
 
 class Config(BaseModel):
@@ -20,3 +44,4 @@ class Config(BaseModel):
     matrix_handle_self_message: bool = False
     matrix_handle_old_events: bool = False
     matrix_proxy: str | None = None
+    matrix_token_store_path: str | None = None

@@ -27,6 +27,7 @@ class ActionFailed(BaseActionFailed, MatrixAdapterException):
         self.errcode: str | None = None
         self.message: str | None = None
         self.retry_after_ms: int | None = None
+        self.soft_logout: bool = False
         self.body: dict[str, Any] | None = None
         if response.content:
             try:
@@ -59,6 +60,7 @@ class ActionFailed(BaseActionFailed, MatrixAdapterException):
         self.errcode = body.get("errcode")
         self.message = body.get("error")
         self.retry_after_ms = body.get("retry_after_ms")
+        self.soft_logout: bool = body.get("soft_logout", False)
 
 
 class UnauthorizedException(ActionFailed):

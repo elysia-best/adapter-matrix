@@ -14,6 +14,7 @@ from .model import (
     MediaConfigResponse,
     MembersChunkResponse,
     MessagesResponse,
+    RefreshTokenResponse,
     RelationsResponse,
     SyncResponse,
     UploadResponse,
@@ -45,6 +46,13 @@ class ApiClient:
         refresh_token: bool | None = None,
     ) -> LoginResponse:
         """Log in with the Matrix password flow."""
+
+    async def refresh_token(
+        self,
+        *,
+        refresh_token: str,
+    ) -> RefreshTokenResponse:
+        """Refresh a Matrix access token."""
 
     async def logout(
         self,

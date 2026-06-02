@@ -53,6 +53,16 @@ class LoginResponse(MatrixBaseModel):
     refresh_token: str | None = None
 
 
+class RefreshTokenRequest(MatrixBaseModel):
+    refresh_token: str
+
+
+class RefreshTokenResponse(MatrixBaseModel):
+    access_token: str | None = None
+    refresh_token: str | None = None
+    expires_in_ms: int | None = None
+
+
 class LoginFlow(MatrixBaseModel):
     type: str
 
@@ -246,6 +256,8 @@ __all__ = (
     "PresenceSync",
     "RawMatrixEvent",
     "ReactionContent",
+    "RefreshTokenRequest",
+    "RefreshTokenResponse",
     "ReactionRelation",
     "ReceiptContent",
     "ReceiptThread",

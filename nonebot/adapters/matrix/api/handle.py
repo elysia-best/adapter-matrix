@@ -16,6 +16,8 @@ from .model import (
     LoginIdentifier,
     LoginResponse,
     MediaConfigResponse,
+    RefreshTokenRequest,
+    RefreshTokenResponse,
     MembersChunkResponse,
     MessagesResponse,
     PasswordLoginRequest,
@@ -187,6 +189,27 @@ class HandleMixin:
             ),
         )
         return type_validate_python(LoginResponse, data)
+
+    async def _api_refresh_token(
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        refresh_token: str,
+    ) -> RefreshTokenResponse:
+        """Refresh a Matrix access token."""
+        payload = RefreshTokenRequest(refresh_token=refresh_token)
+        data = await _request(
+            self,
+            bot.bot_info,
+            _json_request(
+                method="POST",
+                url=self.client_url(bot.bot_info, "/refresh"),
+                body=json.loads(
+                    encode_json_text(payload.model_dump(by_alias=True, exclude_none=True))
+                ),
+            ),
+        )
+        return type_validate_python(RefreshTokenResponse, data)
 
     async def _api_logout(self: AdapterProtocol, bot: Bot) -> None:
         """Invalidate the current Matrix access token."""
