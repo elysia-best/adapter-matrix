@@ -86,14 +86,17 @@ class Bot(BaseBot, ApiClient):
         self,
         room_id: RoomIdentifier,
         message: str | BaseMessage | BaseMessageSegment,
-        *,
-        txn_id: str | None = None,
+        **kwargs: Any,
     ) -> EventIdResponse:
-        content = await build_message_content(message, bot=self)
+        kwargs.update(
+            {
+                "txn_id": kwargs.get("txn_id") or make_txn_id(),
+                "content": await build_message_content(message, bot=self),
+            }
+        )
         return await self.send_message(
             room_id=room_id,
-            txn_id=txn_id or make_txn_id(),
-            content=content,
+            **kwargs,
         )
 
     async def upload_media(
