@@ -5,9 +5,7 @@ name = "nonebot-adapter-matrix"
 version = "0.2.1"
 description = "Matrix adapter for nonebot2"
 authors = [
-    { name = "CMHopeSunshine", email = "277073121@qq.com" },
-    { name = "yanyongyu", email = "yyy@nonebot.dev" },
-    { name = "scdhh", email = "wallfjjd@gmail.com" },
+    { name = "elysia-best", email = "a.elysia@proton.me" }
 ]
 license = "MIT"
 readme = "README.md"
