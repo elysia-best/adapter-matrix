@@ -32,7 +32,6 @@ from .utils import filter_unset_query
 from ..config import BotInfo, Config
 from ..exception import (
     ActionFailed,
-    MatrixAdapterException,
     RateLimitException,
     UnauthorizedException,
 )
@@ -78,7 +77,7 @@ async def _request(
         )
         if HTTPStatus.OK <= data.status_code < HTTPStatus.MULTIPLE_CHOICES:
             if not data.content:
-                return None
+                raise ActionFailed(data)  # noqa: TRY301
             if not parse_json:
                 return data.content
             return json.loads(data.content)
@@ -87,11 +86,9 @@ async def _request(
         if data.status_code == HTTPStatus.TOO_MANY_REQUESTS:
             raise RateLimitException(data)  # noqa: TRY301
         raise ActionFailed(data)  # noqa: TRY301
-    except MatrixAdapterException:
-        raise
     except Exception as e:
         msg = "API request failed"
-        log("ERROR", f"{msg}, exception={e}")
+        log("ERROR", f"{msg}, exception={type(e).__name__}")
 
 
 def _headers(adapter: AdapterProtocol, bot_info: BotInfo) -> dict[str, str]:
@@ -292,6 +289,10 @@ class HandleMixin:
                 timeout=(timeout / 1000 + 5 if timeout else None),
             ),
         )
+        if data is None:
+            raise ActionFailed(
+                Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, content=b"")
+            )
         return type_validate_python(SyncResponse, data)
 
     async def _api_send_event(
