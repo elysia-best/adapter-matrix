@@ -152,10 +152,11 @@ class Bot(BaseBot, ApiClient):
             reason=reason,
         )
 
+    @override
     async def join_room(
         self,
-        room_id: RoomIdentifier,
         *,
+        room_id: RoomIdentifier,
         reason: str | None = None,
     ) -> JoinRoomResponse:
         """Join a Matrix room by ID. Returns the room_id of the joined room."""
