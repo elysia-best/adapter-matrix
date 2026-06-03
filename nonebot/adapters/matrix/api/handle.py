@@ -67,28 +67,24 @@ async def _request(
     parse_json: bool = True,
 ) -> Any:  # noqa: ANN401
     del bot_info
-    try:
-        request.timeout = adapter.matrix_config.matrix_api_timeout
-        request.proxy = adapter.matrix_config.matrix_proxy
-        data = await adapter.request(request)
-        log(
-            "TRACE",
-            f"API code: {data.status_code} response: {escape_tag(str(data.content))}",
-        )
-        if HTTPStatus.OK <= data.status_code < HTTPStatus.MULTIPLE_CHOICES:
-            if not data.content:
-                raise ActionFailed(data)  # noqa: TRY301
-            if not parse_json:
-                return data.content
-            return json.loads(data.content)
-        if data.status_code in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
-            raise UnauthorizedException(data)  # noqa: TRY301
-        if data.status_code == HTTPStatus.TOO_MANY_REQUESTS:
-            raise RateLimitException(data)  # noqa: TRY301
-        raise ActionFailed(data)  # noqa: TRY301
-    except Exception as e:
-        msg = "API request failed"
-        log("ERROR", f"{msg}, exception={type(e).__name__}")
+    request.timeout = adapter.matrix_config.matrix_api_timeout
+    request.proxy = adapter.matrix_config.matrix_proxy
+    data = await adapter.request(request)
+    log(
+        "TRACE",
+        f"API code: {data.status_code} response: {escape_tag(str(data.content))}",
+    )
+    if HTTPStatus.OK <= data.status_code < HTTPStatus.MULTIPLE_CHOICES:
+        if not data.content:
+            raise ActionFailed(data)
+        if not parse_json:
+            return data.content
+        return json.loads(data.content)
+    if data.status_code in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
+        raise UnauthorizedException(data)
+    if data.status_code == HTTPStatus.TOO_MANY_REQUESTS:
+        raise RateLimitException(data)
+    raise ActionFailed(data)
 
 
 def _headers(adapter: AdapterProtocol, bot_info: BotInfo) -> dict[str, str]:
@@ -289,10 +285,6 @@ class HandleMixin:
                 timeout=(timeout / 1000 + 5 if timeout else None),
             ),
         )
-        if data is None:
-            raise ActionFailed(
-                Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, content=b"")
-            )
         return type_validate_python(SyncResponse, data)
 
     async def _api_send_event(
