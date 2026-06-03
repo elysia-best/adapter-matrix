@@ -12,15 +12,16 @@ from yarl import URL
 
 from .model import (
     EventIdResponse,
+    JoinRoomResponse,
     LoginFlowsResponse,
     LoginIdentifier,
     LoginResponse,
     MediaConfigResponse,
-    RefreshTokenRequest,
-    RefreshTokenResponse,
     MembersChunkResponse,
     MessagesResponse,
     PasswordLoginRequest,
+    RefreshTokenRequest,
+    RefreshTokenResponse,
     RelationsResponse,
     SyncResponse,
     UploadResponse,
@@ -205,7 +206,9 @@ class HandleMixin:
                 method="POST",
                 url=self.client_url(bot.bot_info, "/refresh"),
                 body=json.loads(
-                    encode_json_text(payload.model_dump(by_alias=True, exclude_none=True))
+                    encode_json_text(
+                        payload.model_dump(by_alias=True, exclude_none=True)
+                    )
                 ),
             ),
         )
@@ -627,3 +630,23 @@ class HandleMixin:
                 },
             },
         )
+
+    async def _api_join_room(
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        room_id: RoomIdentifier,
+        reason: str | None = None,
+    ) -> JoinRoomResponse:
+        """Join a Matrix room by ID."""
+        data = await _request(
+            self,
+            bot.bot_info,
+            _json_request(
+                method="POST",
+                url=self.client_url(bot.bot_info, f"/rooms/{quote_path(room_id)}/join"),
+                headers=_headers(self, bot.bot_info),
+                body=filter_unset_query({"reason": reason}),
+            ),
+        )
+        return type_validate_python(JoinRoomResponse, data)

@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import contextlib
 from dataclasses import dataclass, field
+from http import HTTPStatus
 import secrets
 import string
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urljoin
 
 from requests_oauth2client import PkceUtils
 
 HttpGetJson = Callable[[str], Awaitable[dict[str, Any]]]
 HttpPostJson = Callable[[str, dict[str, Any]], Awaitable[tuple[int, dict[str, Any]]]]
 HttpPostForm = Callable[[str, dict[str, str]], Awaitable[tuple[int, dict[str, Any]]]]
+
+_DEFAULT_TOKEN_TYPE = "Bearer"  # noqa: S105
+_MIN_REQUEST_PARTS = 2
 
 
 @dataclass
@@ -31,7 +36,7 @@ class OAuth2TokenResponse:
     access_token: str
     refresh_token: str | None
     expires_in: int | None
-    token_type: str = "Bearer"
+    token_type: str = _DEFAULT_TOKEN_TYPE
     scope: str | None = None
 
 
@@ -72,8 +77,6 @@ async def _try_msc2965_discovery(
     homeserver: str, http_get_json: HttpGetJson
 ) -> dict[str, Any] | None:
     """Try MSC2965 auth_metadata endpoints directly on the homeserver."""
-    from urllib.parse import urljoin
-
     urls = [
         urljoin(homeserver.rstrip("/") + "/", "_matrix/client/v1/auth_metadata"),
         urljoin(
@@ -82,10 +85,8 @@ async def _try_msc2965_discovery(
         ),
     ]
     for url in urls:
-        try:
+        with contextlib.suppress(OAuth2DiscoveryError):
             return await http_get_json(url)
-        except OAuth2DiscoveryError:
-            continue
     return None
 
 
@@ -132,27 +133,68 @@ def validate_oauth_metadata(metadata: OAuth2Metadata, raw: dict[str, Any]) -> No
     pre-registered static client IDs.
     """
     if not metadata.authorization_endpoint:
-        raise OAuth2DiscoveryError("OAuth2 metadata missing authorization_endpoint")
+        msg = "OAuth2 metadata missing authorization_endpoint"
+        raise OAuth2DiscoveryError(msg)
     if not metadata.token_endpoint:
-        raise OAuth2DiscoveryError("OAuth2 metadata missing token_endpoint")
+        msg = "OAuth2 metadata missing token_endpoint"
+        raise OAuth2DiscoveryError(msg)
 
     response_types = raw.get("response_types_supported")
     if not isinstance(response_types, list) or "code" not in response_types:
-        raise OAuth2DiscoveryError("OAuth2 server does not support response_type=code")
+        msg = "OAuth2 server does not support response_type=code"
+        raise OAuth2DiscoveryError(msg)
 
     response_modes = raw.get("response_modes_supported")
     if not isinstance(response_modes, list) or "fragment" not in response_modes:
-        raise OAuth2DiscoveryError("OAuth2 server does not support response_mode=fragment")
+        msg = "OAuth2 server does not support response_mode=fragment"
+        raise OAuth2DiscoveryError(msg)
 
     grant_types = raw.get("grant_types_supported")
     if isinstance(grant_types, list) and "authorization_code" not in grant_types:
-        raise OAuth2DiscoveryError(
-            "OAuth2 server does not support grant_type=authorization_code"
-        )
+        msg = "OAuth2 server does not support grant_type=authorization_code"
+        raise OAuth2DiscoveryError(msg)
 
     challenge_methods = raw.get("code_challenge_methods_supported")
     if not isinstance(challenge_methods, list) or "S256" not in challenge_methods:
-        raise OAuth2DiscoveryError("OAuth2 server does not support PKCE S256")
+        msg = "OAuth2 server does not support PKCE S256"
+        raise OAuth2DiscoveryError(msg)
+
+
+@dataclass
+class AuthorizationRequest:
+    """Parameters for building an OAuth2 authorization URL."""
+
+    authorization_endpoint: str
+    client_id: str
+    redirect_uri: str
+    code_challenge: str
+    state: str
+    nonce: str | None = None
+    code_challenge_method: str = "S256"
+    scope: str = "openid urn:matrix:org.matrix.msc2967.client:api:*"
+
+
+@dataclass
+class TokenExchangeRequest:
+    """Parameters for exchanging an authorization code for tokens."""
+
+    token_endpoint: str
+    client_id: str
+    code: str
+    code_verifier: str
+    redirect_uri: str
+    client_secret: str | None = None
+
+
+@dataclass
+class ClientRegistrationRequest:
+    """Parameters for dynamic OAuth2 client registration."""
+
+    registration_endpoint: str
+    client_name: str
+    redirect_uris: list[str]
+    client_uri: str | None = None
+    application_type: str = "web"
 
 
 def create_pkce_pair() -> tuple[str, str]:
@@ -162,37 +204,27 @@ def create_pkce_pair() -> tuple[str, str]:
     return verifier, challenge
 
 
-def build_authorization_url(
-    authorization_endpoint: str,
-    client_id: str,
-    redirect_uri: str,
-    code_challenge: str,
-    state: str,
-    *,
-    nonce: str | None = None,
-    code_challenge_method: str = "S256",
-    scope: str = "openid urn:matrix:org.matrix.msc2967.client:api:*",
-) -> str:
+def build_authorization_url(req: AuthorizationRequest) -> str:
     """Build an OAuth2 authorization URL per MSC2964/MSC2967.
 
     Uses response_mode=fragment. Device ID is embedded in scope
     (urn:matrix:org.matrix.msc2967.client:device:{id}) per MSC2967.
     """
     params: dict[str, str] = {
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
+        "client_id": req.client_id,
+        "redirect_uri": req.redirect_uri,
         "response_type": "code",
         "response_mode": "fragment",
-        "state": state,
-        "code_challenge": code_challenge,
-        "code_challenge_method": code_challenge_method,
-        "scope": scope,
+        "state": req.state,
+        "code_challenge": req.code_challenge,
+        "code_challenge_method": req.code_challenge_method,
+        "scope": req.scope,
     }
-    if nonce:
-        params["nonce"] = nonce
+    if req.nonce:
+        params["nonce"] = req.nonce
 
-    sep = "&" if "?" in authorization_endpoint else "?"
-    return f"{authorization_endpoint}{sep}{urlencode(params)}"
+    sep = "&" if "?" in req.authorization_endpoint else "?"
+    return f"{req.authorization_endpoint}{sep}{urlencode(params)}"
 
 
 class LocalCallbackServer:
@@ -251,7 +283,7 @@ class LocalCallbackServer:
                 return
 
             parts = request_line.decode("ascii", errors="replace").split()
-            request_target = parts[1] if len(parts) >= 2 else "/"
+            request_target = parts[1] if len(parts) >= _MIN_REQUEST_PARTS else "/"
             port = writer.get_extra_info("sockname")[1]
             callback_path = self._callback_path or "/"
             bridge_path = (
@@ -260,7 +292,10 @@ class LocalCallbackServer:
                 else "/fragment"
             )
 
-            if request_target.startswith(f"{bridge_path}?") and not self._event.is_set():
+            if (
+                request_target.startswith(f"{bridge_path}?")
+                and not self._event.is_set()
+            ):
                 self._callback_url = f"http://{self._host}:{port}{request_target}"
                 self._event.set()
                 response = (
@@ -308,28 +343,22 @@ class LocalCallbackServer:
 
 
 async def exchange_authorization_code(
-    token_endpoint: str,
-    client_id: str,
-    code: str,
-    code_verifier: str,
-    redirect_uri: str,
+    req: TokenExchangeRequest,
     http_post_form: HttpPostForm,
-    *,
-    client_secret: str | None = None,
 ) -> OAuth2TokenResponse:
     """Exchange authorization code for tokens at the OAuth2 token endpoint."""
     data: dict[str, str] = {
         "grant_type": "authorization_code",
-        "code": code,
-        "code_verifier": code_verifier,
-        "redirect_uri": redirect_uri,
-        "client_id": client_id,
+        "code": req.code,
+        "code_verifier": req.code_verifier,
+        "redirect_uri": req.redirect_uri,
+        "client_id": req.client_id,
     }
-    if client_secret:
-        data["client_secret"] = client_secret
+    if req.client_secret:
+        data["client_secret"] = req.client_secret
 
-    status, body = await http_post_form(token_endpoint, data)
-    if status < 200 or status >= 300:
+    status, body = await http_post_form(req.token_endpoint, data)
+    if status < HTTPStatus.OK or status >= HTTPStatus.MULTIPLE_CHOICES:
         msg = f"Authorization code exchange failed: HTTP {status}"
         raise OAuth2TokenError(msg, status=status, body=body)
 
@@ -360,7 +389,7 @@ async def refresh_oauth_token(
         data["client_secret"] = client_secret
 
     status, body = await http_post_form(token_endpoint, data)
-    if status < 200 or status >= 300:
+    if status < HTTPStatus.OK or status >= HTTPStatus.MULTIPLE_CHOICES:
         msg = f"OAuth2 token refresh failed: HTTP {status}"
         raise OAuth2TokenError(msg, status=status, body=body)
 
@@ -381,29 +410,24 @@ class OAuth2ClientRegistration:
 
 
 async def register_oauth_client(
-    registration_endpoint: str,
-    client_name: str,
-    redirect_uris: list[str],
+    req: ClientRegistrationRequest,
     http_post_json: HttpPostJson,
-    *,
-    client_uri: str | None = None,
-    application_type: str = "web",
 ) -> OAuth2ClientRegistration:
     """Dynamically register an OAuth2 client (RFC 7591)."""
     # Keep the payload minimal and aligned with the OIDC guide, while preserving
     # Hydrogen's required client_uri field for MAS implementations that enforce it.
     data = {
-        "application_type": application_type,
-        "client_name": client_name,
-        "redirect_uris": redirect_uris,
+        "application_type": req.application_type,
+        "client_name": req.client_name,
+        "redirect_uris": req.redirect_uris,
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",
     }
-    if client_uri:
-        data["client_uri"] = client_uri
-    status, body = await http_post_json(registration_endpoint, data)
-    if status < 200 or status >= 300:
+    if req.client_uri:
+        data["client_uri"] = req.client_uri
+    status, body = await http_post_json(req.registration_endpoint, data)
+    if status < HTTPStatus.OK or status >= HTTPStatus.MULTIPLE_CHOICES:
         msg = f"OAuth2 client registration failed: HTTP {status} BODY {body}"
         raise OAuth2TokenError(msg, status=status, body=body)
 

@@ -4,7 +4,12 @@ from urllib.parse import parse_qs, urlsplit
 from nonebot.adapters.matrix.adapter import _parse_oauth_code
 from nonebot.adapters.matrix.api.handle import quote_path
 from nonebot.adapters.matrix.exception import RateLimitException, UnauthorizedException
-from nonebot.adapters.matrix.oauth import build_authorization_url, register_oauth_client
+from nonebot.adapters.matrix.oauth import (
+    AuthorizationRequest,
+    ClientRegistrationRequest,
+    build_authorization_url,
+    register_oauth_client,
+)
 from tests.fake.doubles import DummyBot
 
 import pytest
@@ -89,17 +94,15 @@ async def test_media_upload_uses_raw_content(dummy_bot: DummyBot) -> None:
 
 @pytest.mark.asyncio
 async def test_refresh_token_request_builds_body(dummy_bot: DummyBot) -> None:
-    dummy_bot.adapter.content = (
-        b'{"access_token":"new-token","refresh_token":"new-refresh","expires_in_ms":60000}'
-    )
+    dummy_bot.adapter.content = b'{"access_token":"new-token","refresh_token":"new-refresh","expires_in_ms":60000}'
 
-    response = await dummy_bot.refresh_token(refresh_token="refresh-1")
+    response = await dummy_bot.refresh_token(refresh_token="refresh-1")  # noqa: S106
 
     request = dummy_bot.adapter.request_calls[-1]
     assert str(request.url) == "https://matrix.example.org/_matrix/client/v3/refresh"
     assert request.json == {"refresh_token": "refresh-1"}
-    assert response.access_token == "new-token"
-    assert response.refresh_token == "new-refresh"
+    assert response.access_token == "new-token"  # noqa: S105
+    assert response.refresh_token == "new-refresh"  # noqa: S105
     assert response.expires_in_ms == 60000
 
 
@@ -126,16 +129,18 @@ def test_quote_path_escapes_reserved_characters() -> None:
 
 def test_build_authorization_url_uses_fragment_and_msc2967_scope() -> None:
     url = build_authorization_url(
-        authorization_endpoint="https://auth.example.org/authorize",
-        client_id="client-123",
-        redirect_uri="http://127.0.0.1:12345/callback",
-        code_challenge="challenge",
-        state="state-1",
-        nonce="nonce-1",
-        scope=(
-            "openid "
-            "urn:matrix:org.matrix.msc2967.client:api:* "
-            "urn:matrix:org.matrix.msc2967.client:device:ABCDEFGHIJKL"
+        AuthorizationRequest(
+            authorization_endpoint="https://auth.example.org/authorize",
+            client_id="client-123",
+            redirect_uri="http://127.0.0.1:12345/callback",
+            code_challenge="challenge",
+            state="state-1",
+            nonce="nonce-1",
+            scope=(
+                "openid "
+                "urn:matrix:org.matrix.msc2967.client:api:* "
+                "urn:matrix:org.matrix.msc2967.client:device:ABCDEFGHIJKL"
+            ),
         ),
     )
     query = parse_qs(urlsplit(url).query)
@@ -144,8 +149,7 @@ def test_build_authorization_url_uses_fragment_and_msc2967_scope() -> None:
     assert query["client_id"] == ["client-123"]
     assert query["nonce"] == ["nonce-1"]
     assert (
-        query["scope"][0]
-        == "openid urn:matrix:org.matrix.msc2967.client:api:* "
+        query["scope"][0] == "openid urn:matrix:org.matrix.msc2967.client:api:* "
         "urn:matrix:org.matrix.msc2967.client:device:ABCDEFGHIJKL"
     )
 
@@ -177,12 +181,14 @@ async def test_register_oauth_client_includes_client_uri() -> None:
         return 200, {"client_id": "client-123", "redirect_uris": data["redirect_uris"]}
 
     registration = await register_oauth_client(
-        "https://account.matrix.org/oauth2/registration",
-        client_name="Matrix Bot",
-        redirect_uris=["http://127.0.0.1:39501/callback"],
+        ClientRegistrationRequest(
+            registration_endpoint="https://account.matrix.org/oauth2/registration",
+            client_name="Matrix Bot",
+            redirect_uris=["http://127.0.0.1:39501/callback"],
+            client_uri="https://matrix.org",
+            application_type="native",
+        ),
         http_post_json=post_json,
-        client_uri="https://matrix.org",
-        application_type="native",
     )
 
     assert registration.client_id == "client-123"
@@ -207,15 +213,15 @@ async def test_login_request_refresh_token_true(dummy_bot: DummyBot) -> None:
     )
 
     response = await dummy_bot.login(
-        password="secret",
+        password="secret",  # noqa: S106
         refresh_token=True,
     )
 
     request = dummy_bot.adapter.request_calls[-1]
     assert str(request.url) == "https://matrix.example.org/_matrix/client/v3/login"
     assert request.json["refresh_token"] is True
-    assert request.json["password"] == "secret"
+    assert request.json["password"] == "secret"  # noqa: S105
     assert request.json["type"] == "m.login.password"
-    assert response.access_token == "new-token"
-    assert response.refresh_token == "new-refresh"
+    assert response.access_token == "new-token"  # noqa: S105
+    assert response.refresh_token == "new-refresh"  # noqa: S105
     assert response.expires_in_ms == 60000

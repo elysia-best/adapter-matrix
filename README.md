@@ -138,7 +138,10 @@ MATRIX_BOTS='[
     "user_id": "@bot:example.org",
     "device_id": "BOTDEVICE",
     "sync_filter": {"room": {"timeline": {"limit": 50}}},
-    "set_presence": "online"
+    "set_presence": "online",
+    "auto_accept_invites": true,
+    "auto_accept_whitelist": null,
+    "auto_accept_blacklist": []
   }
 ]'
 ```
@@ -152,6 +155,9 @@ MATRIX_BOTS='[
 - `device_id`：记录当前 token 对应的 Matrix 设备 ID。
 - `sync_filter`：传给 `/sync` 的 filter id 或 filter JSON。
 - `set_presence`：`online`、`offline` 或 `unavailable`。
+- `auto_accept_invites`：是否启用自动接受群聊邀请，默认 `false`。
+- `auto_accept_whitelist`：允许自动接受邀请的用户白名单，值为用户 ID 列表（如 `["@alice:example.org"]`）。设为 `null` 表示允许所有用户，设为空列表 `[]` 表示不允许任何用户（行为同 `auto_accept_invites: false`）。
+- `auto_accept_blacklist`：禁止自动接受邀请的用户黑名单，默认 `[]`。黑名单优先级高于白名单。
 
 ### 其他配置
 
@@ -241,7 +247,31 @@ await bot.react(event.room_id, event.event_id, "👍")
 await bot.set_typing_state(event.room_id, typing=True, timeout=5000)
 await bot.mark_read(event.room_id, event.event_id)
 await bot.redact(event.room_id, event.event_id, reason="handled")
+await bot.join_room("!roomid:example.org", reason="Auto-joined")
 ```
+
+### 自动接受邀请
+
+适配器支持按照白名单 / 黑名单自动接受 Matrix 群聊邀请。当收到邀请时，适配器会从 `invite_state` 中提取邀请人信息，根据配置决定是否自动加入房间。
+
+**配置示例：**
+
+```dotenv
+MATRIX_BOTS='[
+  {
+    "homeserver": "https://matrix.example.org",
+    "access_token": "YOUR_ACCESS_TOKEN",
+    "user_id": "@bot:example.org",
+    "auto_accept_invites": true,
+    "auto_accept_whitelist": ["@alice:example.org", "@bob:example.org"],
+    "auto_accept_blacklist": ["@spammer:matrix.org"]
+  }
+]'
+```
+
+- 若 `auto_accept_whitelist` 设置为 `null`（或不配置），则允许任意用户邀请机器人入群。
+- 黑名单优先级高于白名单：即使用户在白名单中，若同时出现在黑名单中也不会自动接受邀请。
+- 自动加入失败时仅记录错误日志，不会中断同步循环。
 
 ## 当前范围
 
@@ -249,7 +279,7 @@ await bot.redact(event.room_id, event.event_id, reason="handled")
 
 - 通过 `/account/whoami` 校验身份。
 - 通过 `/sync` long-poll 接收 room timeline、state、typing、receipt 等事件。
-- 支持发送 `m.room.message`、上传媒体、reaction、redaction、typing 和 receipt。
+- 支持发送 `m.room.message`、上传媒体、reaction、redaction、typing、receipt 和 join room。
 - 不包含端到端加密房间支持。
 - 不包含 Matrix Application Service API。
 - 不持久化 `/sync` 的 `next_batch`；进程内重连会复用内存状态，跨进程重启默认丢弃早于本次启动时间的旧事件。

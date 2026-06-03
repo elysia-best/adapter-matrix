@@ -31,6 +31,11 @@ class BotInfo(BaseModel):
     oauth_open_browser: bool = False
     oauth_callback_timeout: float = 300.0
 
+    # Auto-accept room invites
+    auto_accept_invites: bool = False
+    auto_accept_whitelist: list[str] | None = None  # None = all users allowed
+    auto_accept_blacklist: list[str] = Field(default_factory=list)
+
     # Runtime / persisted field
     session_type: str | None = None  # "legacy_login" | "oauth2" | None
     oauth_token_endpoint: str | None = None  # persisted for OAuth2 refresh

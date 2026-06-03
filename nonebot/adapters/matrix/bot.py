@@ -14,7 +14,13 @@ from nonebot.adapters import (
 
 from nonebot.message import handle_event
 
-from .api import ApiClient, EventIdResponse, UploadResponse, WhoamiResponse
+from .api import (
+    ApiClient,
+    EventIdResponse,
+    JoinRoomResponse,
+    UploadResponse,
+    WhoamiResponse,
+)
 from .api.types import EventId, RoomIdentifier, UserId
 from .config import BotInfo
 from .event import Event, MessageEvent
@@ -58,6 +64,10 @@ class Bot(BaseBot, ApiClient):
     @property
     def self_info(self) -> WhoamiResponse:
         return self._self_info
+
+    def update_self_info(self, self_info: WhoamiResponse) -> None:
+        """Update the internal self_info after token refresh."""
+        self._self_info = self_info
 
     @property
     def user_id(self) -> UserId:
@@ -140,6 +150,17 @@ class Bot(BaseBot, ApiClient):
             event_id=event_id,
             txn_id=txn_id or make_txn_id(),
             reason=reason,
+        )
+
+    async def join_room(
+        self,
+        room_id: RoomIdentifier,
+        *,
+        reason: str | None = None,
+    ) -> JoinRoomResponse:
+        """Join a Matrix room by ID. Returns the room_id of the joined room."""
+        return await self.call_api(  # type: ignore[return-value]
+            "join_room", room_id=room_id, reason=reason
         )
 
     async def set_typing_state(

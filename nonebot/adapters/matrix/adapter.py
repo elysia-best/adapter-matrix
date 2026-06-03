@@ -1,35 +1,52 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
+import contextlib
 from functools import lru_cache
+from http import HTTPStatus
 import inspect
 import json
 from pathlib import Path
+import sys
 from time import time
 from typing import Any
 from typing_extensions import override
+from urllib.parse import parse_qs, urlencode, urlparse
+import webbrowser
 
 from nonebot.adapters import Adapter as BaseAdapter, Bot as BaseBot
 
-from nonebot.drivers import URL, Driver, ForwardDriver
+from nonebot.drivers import URL, Driver, ForwardDriver, Request
 from nonebot.plugin import get_plugin_config
 from nonebot.utils import escape_tag
 
 from .api.handle import HandleMixin
-from .api.model import LoginResponse, RawMatrixEvent, SyncResponse, WhoamiResponse
+from .api.model import (
+    InvitedRoomSync,
+    LoginResponse,
+    RawMatrixEvent,
+    SyncResponse,
+    WhoamiResponse,
+)
 from .api.types import UserId
 from .bot import Bot
 from .config import BotInfo, Config
 from .event import InviteEvent, LeaveEvent, event_from_raw
-from .exception import ApiNotAvailable, NetworkError, RateLimitException, UnauthorizedException
+from .exception import (
+    ApiNotAvailable,
+    NetworkError,
+    RateLimitException,
+    UnauthorizedException,
+)
 from .oauth import (
+    AuthorizationRequest,
+    ClientRegistrationRequest,
     LocalCallbackServer,
     OAuth2DiscoveryError,
     OAuth2Error,
-    OAuth2Metadata,
-    OAuth2TokenError,
     OAuth2TokenResponse,
+    TokenExchangeRequest,
     build_authorization_url,
     create_pkce_pair,
     discover_oauth_metadata,
@@ -52,8 +69,6 @@ def _get_handler_params(handler: Callable[..., Any]) -> Mapping[str, inspect.Par
 
 
 def _parse_oauth_code(url: str) -> str | None:
-    from urllib.parse import parse_qs, urlparse
-
     parsed = urlparse(url)
     params = parse_qs(parsed.query)
     code = params.get("code", [None])[0]
@@ -150,7 +165,7 @@ class Adapter(BaseAdapter, HandleMixin):
         log("ERROR", f"Matrix token store {path} is not a JSON object")
         return {}
 
-    def _load_persisted_tokens(self, bot_info: BotInfo) -> None:
+    def _load_persisted_tokens(self, bot_info: BotInfo) -> None:  # noqa: C901
         key = self._bot_store_key(bot_info)
         if key is None:
             return
@@ -184,7 +199,9 @@ class Adapter(BaseAdapter, HandleMixin):
         if isinstance(oauth_client_id, str) and oauth_client_id:
             bot_info.oauth_client_id = oauth_client_id
 
-    def _save_persisted_tokens(self, bot_info: BotInfo, self_info: WhoamiResponse) -> None:
+    def _save_persisted_tokens(
+        self, bot_info: BotInfo, self_info: WhoamiResponse
+    ) -> None:
         path = self._token_store_path()
         if path is None:
             return
@@ -209,12 +226,10 @@ class Adapter(BaseAdapter, HandleMixin):
             temp_path.replace(path)
         except OSError as e:
             log("ERROR", f"Failed to write Matrix token store {path}", e)
-            try:
+            with contextlib.suppress(OSError):
                 temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
 
-    def _apply_token_update(
+    def _apply_token_update(  # noqa: PLR0913
         self,
         bot_info: BotInfo,
         *,
@@ -249,7 +264,10 @@ class Adapter(BaseAdapter, HandleMixin):
         key = self._bot_store_key(bot.bot_info)
         if key is not None:
             lifetime_ms = self._token_lifetimes_ms.get(key)
-            if lifetime_ms is not None and lifetime_ms <= bot.bot_info.refresh_before_expiry_ms:
+            if (
+                lifetime_ms is not None
+                and lifetime_ms <= bot.bot_info.refresh_before_expiry_ms
+            ):
                 return False
         return int(time() * 1000) > expires_at - bot.bot_info.refresh_before_expiry_ms
 
@@ -267,7 +285,7 @@ class Adapter(BaseAdapter, HandleMixin):
             expires_in_ms=response.expires_in_ms,
         )
         self_info = await self._api_whoami(bot)
-        bot._self_info = self_info
+        bot.update_self_info(self_info)
         self._save_persisted_tokens(bot.bot_info, self_info)
         return self_info
 
@@ -281,9 +299,9 @@ class Adapter(BaseAdapter, HandleMixin):
             msg = f"Matrix bot {bot.self_id} missing OAuth2 refresh parameters"
             raise RuntimeError(msg)
 
-        async def _post_form(url: str, data: dict[str, str]) -> tuple[int, dict[str, Any]]:
-            from urllib.parse import urlencode
-            from nonebot.drivers import Request
+        async def _post_form(
+            url: str, data: dict[str, str]
+        ) -> tuple[int, dict[str, Any]]:
             body = urlencode(data).encode("ascii")
             resp = await self.request(
                 Request(
@@ -293,8 +311,7 @@ class Adapter(BaseAdapter, HandleMixin):
                     content=body,
                 )
             )
-            import json as _json
-            parsed = _json.loads(resp.content) if resp.content else {}
+            parsed = json.loads(resp.content) if resp.content else {}
             return resp.status_code, parsed
 
         oauth_response = await refresh_oauth_token(
@@ -312,7 +329,7 @@ class Adapter(BaseAdapter, HandleMixin):
             else None,
         )
         self_info = await self._api_whoami(bot)
-        bot._self_info = self_info
+        bot.update_self_info(self_info)
         self._save_persisted_tokens(bot_info, self_info)
         return self_info
 
@@ -347,32 +364,124 @@ class Adapter(BaseAdapter, HandleMixin):
 
     async def _run_oauth2_login(self, bot_info: BotInfo) -> OAuth2TokenResponse:
         """Run the OAuth2 authorization code flow to obtain the first token pair."""
+        _get_json, _post_json, _post_form = self._make_oauth_http_helpers()
+
+        metadata = await discover_oauth_metadata(
+            bot_info.homeserver,
+            _get_json,
+            server_url=bot_info.oauth_server_url,
+            metadata_url=bot_info.oauth_metadata_url,
+        )
+        bot_info.oauth_token_endpoint = metadata.token_endpoint
+
+        (
+            redirect_uri,
+            callback_server,
+            application_type,
+        ) = await self._setup_oauth_redirect_uri(bot_info)
+
+        if not bot_info.oauth_client_id:
+            if not metadata.registration_endpoint:
+                msg = "oauth_client_id is required because registration_endpoint is unavailable"
+                raise OAuth2Error(msg)
+            log("INFO", "Auto-registering OAuth2 client")
+            client_name = (
+                bot_info.login_initial_device_display_name
+                or bot_info.login_user
+                or "Matrix Bot"
+            )
+            registration = await register_oauth_client(
+                ClientRegistrationRequest(
+                    registration_endpoint=metadata.registration_endpoint,
+                    client_name=client_name,
+                    redirect_uris=[redirect_uri],
+                    client_uri=bot_info.oauth_client_uri or bot_info.homeserver,
+                    application_type=application_type,
+                ),
+                http_post_json=_post_json,
+            )
+            bot_info.oauth_client_id = registration.client_id
+            log("INFO", f"Registered OAuth2 client: {registration.client_id}")
+
+        # Hydrogen-style flow: generate device id first, then embed it in MSC2967 scope.
+        device_id = (
+            bot_info.oauth_device_id or bot_info.device_id or generate_device_id()
+        )
+        bot_info.device_id = device_id
+
+        code_verifier, code_challenge = create_pkce_pair()
+        state = generate_token()
+
+        device_scope = f"urn:matrix:org.matrix.msc2967.client:device:{device_id}"
+        scope = bot_info.oauth_scope or "urn:matrix:org.matrix.msc2967.client:api:*"
+        if device_scope not in scope.split():
+            scope = f"{scope} {device_scope}"
+        nonce = generate_token() if "openid" in scope.split() else None
+
+        # Equivalent to Hydrogen's authorizationEndpoint(): fragment mode + PKCE S256.
+        auth_url = build_authorization_url(
+            AuthorizationRequest(
+                authorization_endpoint=metadata.authorization_endpoint,
+                client_id=bot_info.oauth_client_id,
+                redirect_uri=redirect_uri,
+                code_challenge=code_challenge,
+                state=state,
+                nonce=nonce,
+                scope=scope,
+            ),
+        )
+
+        log("INFO", f"OAuth2 authorization URL: {auth_url}")
+        if bot_info.oauth_open_browser:
+            webbrowser.open(auth_url)
+
+        code = await self._collect_oauth_code(callback_server)
+        if not code:
+            msg = "No authorization code in OAuth2 callback"
+            raise OAuth2Error(msg)
+
+        return await exchange_authorization_code(
+            TokenExchangeRequest(
+                token_endpoint=metadata.token_endpoint,
+                client_id=bot_info.oauth_client_id,
+                code=code,
+                code_verifier=code_verifier,
+                redirect_uri=redirect_uri,
+            ),
+            http_post_form=_post_form,
+        )
+
+    def _make_oauth_http_helpers(
+        self,
+    ) -> tuple[
+        Callable[[str], Awaitable[dict[str, Any]]],
+        Callable[[str, dict[str, Any]], Awaitable[tuple[int, dict[str, Any]]]],
+        Callable[[str, dict[str, str]], Awaitable[tuple[int, dict[str, Any]]]],
+    ]:
+        """Return the HTTP helper functions used during OAuth2 flow."""
 
         async def _get_json(url: str) -> dict[str, Any]:
-            from nonebot.drivers import Request
-
             resp = await self.request(Request("GET", URL(url)))
-            if resp.status_code < 200 or resp.status_code >= 300:
+            if (
+                resp.status_code < HTTPStatus.OK
+                or resp.status_code >= HTTPStatus.MULTIPLE_CHOICES
+            ):
                 msg = f"OAuth2 discovery HTTP {resp.status_code} for {url}"
                 raise OAuth2DiscoveryError(msg)
             if not resp.content:
                 msg = f"OAuth2 discovery returned empty body for {url}"
                 raise OAuth2DiscoveryError(msg)
-            import json as _json
 
             try:
-                return _json.loads(resp.content)
-            except _json.JSONDecodeError as e:
+                return json.loads(resp.content)
+            except json.JSONDecodeError as e:
                 msg = f"OAuth2 discovery returned non-JSON response for {url}"
                 raise OAuth2DiscoveryError(msg) from e
 
         async def _post_json(
             url: str, data: dict[str, Any]
         ) -> tuple[int, dict[str, Any]]:
-            from nonebot.drivers import Request
-            import json as _json
-
-            body = _json.dumps(data).encode("utf-8")
+            body = json.dumps(data).encode("utf-8")
             resp = await self.request(
                 Request(
                     "POST",
@@ -384,16 +493,12 @@ class Adapter(BaseAdapter, HandleMixin):
                     content=body,
                 )
             )
-            parsed_body = _json.loads(resp.content) if resp.content else {}
+            parsed_body = json.loads(resp.content) if resp.content else {}
             return resp.status_code, parsed_body
 
         async def _post_form(
             url: str, data: dict[str, str]
         ) -> tuple[int, dict[str, Any]]:
-            from urllib.parse import urlencode
-            from nonebot.drivers import Request
-            import json as _json
-
             body = urlencode(data).encode("ascii")
             resp = await self.request(
                 Request(
@@ -403,17 +508,15 @@ class Adapter(BaseAdapter, HandleMixin):
                     content=body,
                 )
             )
-            parsed_body = _json.loads(resp.content) if resp.content else {}
+            parsed_body = json.loads(resp.content) if resp.content else {}
             return resp.status_code, parsed_body
 
-        metadata = await discover_oauth_metadata(
-            bot_info.homeserver,
-            _get_json,
-            server_url=bot_info.oauth_server_url,
-            metadata_url=bot_info.oauth_metadata_url,
-        )
-        bot_info.oauth_token_endpoint = metadata.token_endpoint
+        return _get_json, _post_json, _post_form
 
+    async def _setup_oauth_redirect_uri(
+        self, bot_info: BotInfo
+    ) -> tuple[str, LocalCallbackServer | None, str]:
+        """Set up the OAuth2 redirect URI and callback server."""
         redirect_uri = bot_info.oauth_redirect_uri
         callback_server: LocalCallbackServer | None = None
         application_type = "web"
@@ -428,8 +531,6 @@ class Adapter(BaseAdapter, HandleMixin):
             redirect_uri = f"http://{host}:{port}/callback"
             application_type = "native"
         else:
-            from urllib.parse import urlparse
-
             parsed = urlparse(redirect_uri)
             if parsed.hostname in ("127.0.0.1", "localhost"):
                 if parsed.port is None:
@@ -446,88 +547,71 @@ class Adapter(BaseAdapter, HandleMixin):
                 )
                 await callback_server.start()
                 application_type = "native"
+        return redirect_uri, callback_server, application_type
 
-        if not bot_info.oauth_client_id:
-            if not metadata.registration_endpoint:
-                msg = "oauth_client_id is required because registration_endpoint is unavailable"
-                raise OAuth2Error(msg)
-            log("INFO", "Auto-registering OAuth2 client")
-            client_name = (
-                bot_info.login_initial_device_display_name
-                or bot_info.login_user
-                or "Matrix Bot"
-            )
-            registration = await register_oauth_client(
-                metadata.registration_endpoint,
-                client_name=client_name,
-                redirect_uris=[redirect_uri],
-                http_post_json=_post_json,
-                client_uri=bot_info.oauth_client_uri or bot_info.homeserver,
-                application_type=application_type,
-            )
-            bot_info.oauth_client_id = registration.client_id
-            log("INFO", f"Registered OAuth2 client: {registration.client_id}")
-
-        # Hydrogen-style flow: generate device id first, then embed it in MSC2967 scope.
-        device_id = bot_info.oauth_device_id or bot_info.device_id or generate_device_id()
-        bot_info.device_id = device_id
-
-        code_verifier, code_challenge = create_pkce_pair()
-        state = generate_token()
-
-        device_scope = f"urn:matrix:org.matrix.msc2967.client:device:{device_id}"
-        scope = bot_info.oauth_scope or "urn:matrix:org.matrix.msc2967.client:api:*"
-        if device_scope not in scope.split():
-            scope = f"{scope} {device_scope}"
-        nonce = generate_token() if "openid" in scope.split() else None
-
-        # Equivalent to Hydrogen's authorizationEndpoint(): fragment mode + PKCE S256.
-        auth_url = build_authorization_url(
-            authorization_endpoint=metadata.authorization_endpoint,
-            client_id=bot_info.oauth_client_id,
-            redirect_uri=redirect_uri,
-            code_challenge=code_challenge,
-            state=state,
-            nonce=nonce,
-            scope=scope,
-        )
-
-        log("INFO", f"OAuth2 authorization URL: {auth_url}")
-        if bot_info.oauth_open_browser:
-            import webbrowser
-
-            webbrowser.open(auth_url)
-
+    async def _collect_oauth_code(
+        self, callback_server: LocalCallbackServer | None
+    ) -> str | None:
+        """Wait for and collect the OAuth2 authorization code."""
         if callback_server is not None:
             callback_url = await callback_server.wait_for_callback()
             await callback_server.shutdown()
-            code = _parse_oauth_code(callback_url)
-        else:
-            log("INFO", "Paste the authorization code or full redirect URL:")
-            import sys
+            return _parse_oauth_code(callback_url)
+        log("INFO", "Paste the authorization code or full redirect URL:")
+        pasted = (
+            await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
+        ).strip()
+        return _parse_oauth_code(pasted) or pasted
 
-            pasted = (
-                await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
-            ).strip()
-            code = _parse_oauth_code(pasted) or pasted
-
-        if not code:
-            msg = "No authorization code in OAuth2 callback"
-            raise OAuth2Error(msg)
-
-        return await exchange_authorization_code(
-            token_endpoint=metadata.token_endpoint,
-            client_id=bot_info.oauth_client_id,
-            code=code,
-            code_verifier=code_verifier,
-            redirect_uri=redirect_uri,
-            http_post_form=_post_form,
-        )
-
-    def _should_retry_with_refresh(self, exception: UnauthorizedException, bot: Bot) -> bool:
+    def _should_retry_with_refresh(
+        self, exception: UnauthorizedException, bot: Bot
+    ) -> bool:
         if bot.bot_info.refresh_token is None:
             return False
         return exception.errcode in {None, "M_UNKNOWN_TOKEN"}
+
+    async def _handle_sync_unauthorized(
+        self, bot: Bot, e: UnauthorizedException
+    ) -> bool:
+        """Handle UnauthorizedException during sync. Returns True if caller should continue."""
+        if self._should_retry_with_refresh(e, bot):
+            try:
+                self_info = await self._refresh_access_token(bot)
+            except UnauthorizedException as refresh_error:
+                log(
+                    "ERROR",
+                    f"Token refresh rejected (4xx) for {bot.self_id}",
+                    refresh_error,
+                )
+                if refresh_error.soft_logout:
+                    self_info = await self._relogin_if_soft_logout(bot)
+                    if self_info is not None:
+                        return True
+            except NetworkError:
+                log(
+                    "ERROR",
+                    f"Token refresh network error for {bot.self_id}; "
+                    "keeping existing refresh token for retry",
+                )
+            except Exception as refresh_error:
+                log(
+                    "ERROR",
+                    f"Failed to refresh Matrix access token for {bot.self_id}",
+                    refresh_error,
+                )
+            else:
+                log(
+                    "INFO",
+                    f"Refreshed Matrix access token after unauthorized sync "
+                    f"for {escape_tag(str(self_info.user_id))}",
+                )
+                return True
+        # Check for soft_logout on the original sync error too
+        if e.soft_logout and bot.bot_info.refresh_token is None:
+            self_info = await self._relogin_if_soft_logout(bot)
+            if self_info is not None:
+                return True
+        return False
 
     async def _relogin_if_soft_logout(self, bot: Bot) -> WhoamiResponse | None:
         """Re-login if the bot was soft-logged-out and has login credentials."""
@@ -546,7 +630,7 @@ class Adapter(BaseAdapter, HandleMixin):
             session_type="legacy_login",
         )
         self_info = await self._api_whoami(bot)
-        bot._self_info = self_info
+        bot.update_self_info(self_info)
         self._save_persisted_tokens(bot.bot_info, self_info)
         return self_info
 
@@ -571,12 +655,13 @@ class Adapter(BaseAdapter, HandleMixin):
                     f"Refreshed Matrix access token during bootstrap for "
                     f"{escape_tag(str(self_info.user_id))}",
                 )
-                return self_info
             except Exception:
                 log(
                     "WARNING",
                     "Token refresh failed during bootstrap, will try login",
                 )
+            else:
+                return self_info
 
         # No working refresh token — try password login
         if bot_info.login_password:
@@ -631,10 +716,11 @@ class Adapter(BaseAdapter, HandleMixin):
                 "login_password/login_user for traditional Matrix login or "
                 "enable OAuth2 with oauth_enabled=true and oauth_client_id.",
             )
-        raise RuntimeError(
+        msg = (
             "Failed to bootstrap Matrix bot: "
             "access_token is invalid and no recovery method is available"
         )
+        raise RuntimeError(msg)
 
     async def run_bot(self, bot_info: BotInfo) -> None:
         while True:
@@ -699,44 +785,8 @@ class Adapter(BaseAdapter, HandleMixin):
                 delay = (e.retry_after_ms or 0) / 1000
                 await asyncio.sleep(delay or self.matrix_config.matrix_retry_interval)
             except UnauthorizedException as e:
-                if self._should_retry_with_refresh(e, bot):
-                    try:
-                        self_info = await self._refresh_access_token(bot)
-                    except UnauthorizedException as refresh_error:
-                        log(
-                            "ERROR",
-                            f"Token refresh rejected (4xx) for {bot.self_id}",
-                            refresh_error,
-                        )
-                        if refresh_error.soft_logout:
-                            self_info = await self._relogin_if_soft_logout(bot)
-                            if self_info is not None:
-                                continue
-                    except NetworkError:
-                        log(
-                            "ERROR",
-                            f"Token refresh network error for {bot.self_id}; "
-                            "keeping existing refresh token for retry",
-                        )
-                    except Exception as refresh_error:
-                        log(
-                            "ERROR",
-                            f"Failed to refresh Matrix access token for {bot.self_id}",
-                            refresh_error,
-                        )
-                    else:
-                        log(
-                            "INFO",
-                            f"Refreshed Matrix access token after unauthorized sync "
-                            f"for {escape_tag(str(self_info.user_id))}",
-                        )
-                        continue
-                # Check for soft_logout on the original sync error too
-                if e.soft_logout:
-                    if bot.bot_info.refresh_token is None:
-                        self_info = await self._relogin_if_soft_logout(bot)
-                        if self_info is not None:
-                            continue
+                if await self._handle_sync_unauthorized(bot, e):
+                    continue
                 log("ERROR", f"Error while syncing Matrix bot {bot.self_id}", e)
                 await asyncio.sleep(self.matrix_config.matrix_retry_interval)
             except asyncio.CancelledError:
@@ -758,11 +808,45 @@ class Adapter(BaseAdapter, HandleMixin):
             await bot.handle_event(event)
             for raw in room.invite_state.events:
                 await self._dispatch_room_event(bot, raw, room_id=str(room_id))
+            inviter = self._get_inviter(bot, room)
+            if inviter is not None and self._should_accept_invite(bot, inviter):
+                log(
+                    "INFO",
+                    f"Auto-accepting invite to room {room_id} from {inviter}",
+                )
+                try:
+                    await self._api_join_room(bot, room_id=room_id)
+                except Exception as e:
+                    log("ERROR", f"Failed to auto-join room {room_id}", e)
         for room_id, room in sync.rooms.leave.items():
             event = LeaveEvent(type="m.room.leave", room_id=room_id, content={})
             await bot.handle_event(event)
             for raw in [*room.state.events, *room.timeline.events]:
                 await self._dispatch_room_event(bot, raw, room_id=str(room_id))
+
+    def _get_inviter(self, bot: Bot, room: InvitedRoomSync) -> str | None:
+        """Extract the inviter's user ID from an invited room's state events."""
+        for raw in room.invite_state.events:
+            if (
+                raw.type == "m.room.member"
+                and raw.state_key == bot.user_id
+                and isinstance(raw.content, dict)
+                and raw.content.get("membership") == "invite"
+            ):
+                sender = raw.sender
+                return str(sender) if sender is not None else None
+        return None
+
+    def _should_accept_invite(self, bot: Bot, inviter: str) -> bool:
+        """Check whether an invite from the given inviter should be auto-accepted."""
+        bot_info = bot.bot_info
+        if not bot_info.auto_accept_invites:
+            return False
+        blacklist = bot_info.auto_accept_blacklist
+        if blacklist and inviter in blacklist:
+            return False
+        whitelist = bot_info.auto_accept_whitelist
+        return not (whitelist is not None and inviter not in whitelist)
 
     def _update_direct_rooms(self, bot: Bot, events: list[RawMatrixEvent]) -> None:
         for event in events:

@@ -235,12 +235,17 @@ class RelationsResponse(MatrixBaseModel):
     prev_batch: str | None = None
 
 
+class JoinRoomResponse(MatrixBaseModel):
+    room_id: RoomId
+
+
 __all__ = (
     "AccountData",
     "DeviceLists",
     "EventIdResponse",
     "File",
     "InvitedRoomSync",
+    "JoinRoomResponse",
     "JoinedRoomSync",
     "LeftRoomSync",
     "LoginFlow",
@@ -256,12 +261,12 @@ __all__ = (
     "PresenceSync",
     "RawMatrixEvent",
     "ReactionContent",
-    "RefreshTokenRequest",
-    "RefreshTokenResponse",
     "ReactionRelation",
     "ReceiptContent",
     "ReceiptThread",
     "RedactionContent",
+    "RefreshTokenRequest",
+    "RefreshTokenResponse",
     "RelationsResponse",
     "RoomMemberContent",
     "RoomMessageContent",
