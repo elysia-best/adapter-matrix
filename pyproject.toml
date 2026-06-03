@@ -2,7 +2,7 @@
 
 [project]
 name = "nonebot-adapter-matrix"
-version = "0.2.1"
+version = "0.2.2"
 description = "Matrix adapter for nonebot2"
 authors = [
     { name = "elysia-best", email = "a.elysia@proton.me" }
@@ -177,5 +177,5 @@ pre_commit_hooks = []
 post_commit_hooks = []
 
 [build-system]
-requires = ["uv_build>=0.9.18,<0.10.0"]
+requires = ["uv_build>=0.9.18,<0.12.0"]
 build-backend = "uv_build"
