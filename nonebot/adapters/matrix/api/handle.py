@@ -33,7 +33,6 @@ from ..config import BotInfo, Config
 from ..exception import (
     ActionFailed,
     MatrixAdapterException,
-    NetworkError,
     RateLimitException,
     UnauthorizedException,
 )
@@ -92,7 +91,7 @@ async def _request(
         raise
     except Exception as e:
         msg = "API request failed"
-        raise NetworkError(msg) from e
+        log("ERROR", f"{msg}, exception={e}")
 
 
 def _headers(adapter: AdapterProtocol, bot_info: BotInfo) -> dict[str, str]:
