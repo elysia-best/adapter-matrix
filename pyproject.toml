@@ -2,7 +2,7 @@
 
 [project]
 name = "nonebot-adapter-matrix"
-version = "0.2.2"
+version = "0.2.3"
 description = "Matrix adapter for nonebot2"
 authors = [
     { name = "elysia-best", email = "a.elysia@proton.me" }
