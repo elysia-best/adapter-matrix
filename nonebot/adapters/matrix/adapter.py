@@ -158,7 +158,10 @@ class Adapter(BaseAdapter, HandleMixin):
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as e:
-            log("ERROR", f"Failed to read Matrix token store {path}", e)
+            log(
+                "ERROR",
+                f"Failed to read Matrix token store {path}: {type(e).__name__}: {e}",
+            )
             return {}
         if isinstance(raw, dict):
             return raw
@@ -225,7 +228,10 @@ class Adapter(BaseAdapter, HandleMixin):
             temp_path.write_text(payload + "\n", encoding="utf-8")
             temp_path.replace(path)
         except OSError as e:
-            log("ERROR", f"Failed to write Matrix token store {path}", e)
+            log(
+                "ERROR",
+                f"Failed to write Matrix token store {path}: {type(e).__name__}: {e}",
+            )
             with contextlib.suppress(OSError):
                 temp_path.unlink(missing_ok=True)
 
@@ -580,8 +586,8 @@ class Adapter(BaseAdapter, HandleMixin):
             except UnauthorizedException as refresh_error:
                 log(
                     "ERROR",
-                    f"Token refresh rejected (4xx) for {bot.self_id}",
-                    refresh_error,
+                    f"Token refresh rejected (4xx) for {bot.self_id}: "
+                    f"{type(refresh_error).__name__}: {refresh_error}",
                 )
                 if refresh_error.soft_logout:
                     self_info = await self._relogin_if_soft_logout(bot)
@@ -596,8 +602,8 @@ class Adapter(BaseAdapter, HandleMixin):
             except Exception as refresh_error:
                 log(
                     "ERROR",
-                    f"Failed to refresh Matrix access token for {bot.self_id}",
-                    refresh_error,
+                    f"Failed to refresh Matrix access token for {bot.self_id}: "
+                    f"{type(refresh_error).__name__}: {refresh_error}",
                 )
             else:
                 log(
@@ -688,7 +694,10 @@ class Adapter(BaseAdapter, HandleMixin):
             try:
                 token_resp = await self._run_oauth2_login(bot_info)
             except OAuth2Error as oauth_err:
-                log("ERROR", "OAuth2 login failed", oauth_err)
+                log(
+                    "ERROR",
+                    f"OAuth2 login failed: {type(oauth_err).__name__}: {oauth_err}",
+                )
                 raise
             self._apply_token_update(
                 bot_info,
@@ -734,7 +743,10 @@ class Adapter(BaseAdapter, HandleMixin):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                log("ERROR", "Matrix bot loop failed; retrying...", e)
+                log(
+                    "ERROR",
+                    f"Matrix bot loop failed; retrying...  {type(e).__name__}: {e}",
+                )
                 await asyncio.sleep(self.matrix_config.matrix_retry_interval)
             finally:
                 if bot and bot.self_id in self.bots:
@@ -787,12 +799,18 @@ class Adapter(BaseAdapter, HandleMixin):
             except UnauthorizedException as e:
                 if await self._handle_sync_unauthorized(bot, e):
                     continue
-                log("ERROR", f"Error while syncing Matrix bot {bot.self_id}", e)
+                log(
+                    "ERROR",
+                    f"Error while syncing Matrix bot {bot.self_id}: {type(e).__name__}: {e}",
+                )
                 await asyncio.sleep(self.matrix_config.matrix_retry_interval)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                log("ERROR", f"Error while syncing Matrix bot {bot.self_id}", e)
+                log(
+                    "ERROR",
+                    f"Error while syncing Matrix bot {bot.self_id}: {type(e).__name__}: {e}",
+                )
                 await asyncio.sleep(self.matrix_config.matrix_retry_interval)
 
     async def _handle_sync(self, bot: Bot, sync: SyncResponse) -> None:
@@ -817,7 +835,10 @@ class Adapter(BaseAdapter, HandleMixin):
                 try:
                     await self._api_join_room(bot, room_id=room_id)
                 except Exception as e:
-                    log("ERROR", f"Failed to auto-join room {room_id}", e)
+                    log(
+                        "ERROR",
+                        f"Failed to auto-join room {room_id}: {type(e).__name__}: {e}",
+                    )
         for room_id, room in sync.rooms.leave.items():
             event = LeaveEvent(type="m.room.leave", room_id=room_id, content={})
             await bot.handle_event(event)
