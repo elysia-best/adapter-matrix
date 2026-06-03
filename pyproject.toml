@@ -113,6 +113,13 @@ flake8-quotes = { inline-quotes = "double", multiline-quotes = "double" }
 [tool.ruff.lint.extend-per-file-ignores]
 "tests/*" = [
     "S101",    # assert
+    "S105",    # test tokens are not real passwords
+    "S106",    # test tokens are not real passwords
+    "S107",    # test tokens in default values are not real passwords
+    "SLF001",  # tests need to access private members
+    "ARG001",  # test fixtures sometimes have unused params
+    "PLC0415", # conditional imports for mocks
+    "PLR0913", # test doubles need flexible constructors
     "PLR2004", # magic-value-comparison
 ]
 "nonebot/adapters/matrix/api/client.pyi" = [

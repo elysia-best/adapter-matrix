@@ -46,7 +46,7 @@ class DummyBot(Bot):
         adapter: DummyAdapter | None = None,
         *,
         homeserver: str = "https://matrix.example.org",
-        access_token: str = "test-token",  # noqa: S107
+        access_token: str = "test-token",
         refresh_token: str | None = None,
         access_token_expires_at_ms: int | None = None,
         refresh_before_expiry_ms: int = 60000,

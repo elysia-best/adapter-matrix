@@ -96,13 +96,13 @@ async def test_media_upload_uses_raw_content(dummy_bot: DummyBot) -> None:
 async def test_refresh_token_request_builds_body(dummy_bot: DummyBot) -> None:
     dummy_bot.adapter.content = b'{"access_token":"new-token","refresh_token":"new-refresh","expires_in_ms":60000}'
 
-    response = await dummy_bot.refresh_token(refresh_token="refresh-1")  # noqa: S106
+    response = await dummy_bot.refresh_token(refresh_token="refresh-1")
 
     request = dummy_bot.adapter.request_calls[-1]
     assert str(request.url) == "https://matrix.example.org/_matrix/client/v3/refresh"
     assert request.json == {"refresh_token": "refresh-1"}
-    assert response.access_token == "new-token"  # noqa: S105
-    assert response.refresh_token == "new-refresh"  # noqa: S105
+    assert response.access_token == "new-token"
+    assert response.refresh_token == "new-refresh"
     assert response.expires_in_ms == 60000
 
 
@@ -213,15 +213,15 @@ async def test_login_request_refresh_token_true(dummy_bot: DummyBot) -> None:
     )
 
     response = await dummy_bot.login(
-        password="secret",  # noqa: S106
+        password="secret",
         refresh_token=True,
     )
 
     request = dummy_bot.adapter.request_calls[-1]
     assert str(request.url) == "https://matrix.example.org/_matrix/client/v3/login"
     assert request.json["refresh_token"] is True
-    assert request.json["password"] == "secret"  # noqa: S105
+    assert request.json["password"] == "secret"
     assert request.json["type"] == "m.login.password"
-    assert response.access_token == "new-token"  # noqa: S105
-    assert response.refresh_token == "new-refresh"  # noqa: S105
+    assert response.access_token == "new-token"
+    assert response.refresh_token == "new-refresh"
     assert response.expires_in_ms == 60000

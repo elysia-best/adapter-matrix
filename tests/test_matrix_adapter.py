@@ -3,12 +3,12 @@ import json
 from pathlib import Path
 from time import time
 
-import pytest
-
 from nonebot.adapters.matrix.api.model import RawMatrixEvent
 from nonebot.adapters.matrix.config import BotInfo, Config
 from nonebot.adapters.matrix.event import Event
 from tests.fake.doubles import DummyAdapter, DummyBot
+
+import pytest
 
 
 @pytest.mark.asyncio
@@ -45,7 +45,9 @@ async def test_dispatch_room_event_discards_old_events_by_default(
         room_id="!room:example.org",
     )
 
-    assert [event.get_message().extract_plain_text() for event in handled_events] == ["new"]
+    assert [event.get_message().extract_plain_text() for event in handled_events] == [
+        "new"
+    ]
 
 
 @pytest.mark.asyncio
@@ -73,7 +75,9 @@ async def test_dispatch_room_event_handles_old_events_when_configured(
         room_id="!room:example.org",
     )
 
-    assert [event.get_message().extract_plain_text() for event in handled_events] == ["old"]
+    assert [event.get_message().extract_plain_text() for event in handled_events] == [
+        "old"
+    ]
 
 
 def test_old_event_handling_is_disabled_by_default() -> None:
@@ -156,7 +160,9 @@ async def test_bootstrap_refreshes_after_unauthorized(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_sync_loop_refreshes_before_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_sync_loop_refreshes_before_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     adapter = DummyAdapter(
         responses=[
             (
@@ -194,7 +200,9 @@ async def test_sync_loop_refreshes_before_expiry(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
-async def test_sync_loop_refreshes_after_unknown_token(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_sync_loop_refreshes_after_unknown_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     adapter = DummyAdapter(
         responses=[
             (401, b'{"errcode":"M_UNKNOWN_TOKEN","error":"expired"}'),
@@ -227,7 +235,9 @@ async def test_sync_loop_refreshes_after_unknown_token(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
-async def test_sync_loop_without_refresh_token_keeps_unauthorized(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_sync_loop_without_refresh_token_keeps_unauthorized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     adapter = DummyAdapter(
         responses=[(401, b'{"errcode":"M_UNKNOWN_TOKEN","error":"expired"}')]
     )

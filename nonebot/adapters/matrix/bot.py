@@ -96,7 +96,7 @@ class Bot(BaseBot, ApiClient):
         self,
         room_id: RoomIdentifier,
         message: str | BaseMessage | BaseMessageSegment,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ANN401
     ) -> EventIdResponse:
         kwargs.update(
             {
