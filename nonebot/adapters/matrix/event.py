@@ -96,6 +96,16 @@ class RoomMessageEvent(MessageEvent):
     pass
 
 
+class EncryptedRoomEvent(MessageEvent):
+    """m.room.encrypted 事件，表示一条 Megolm 加密的房间消息。
+
+    解密成功后，content 会被替换为明文内容 (如同 m.room.message)，
+    原始加密内容保留在 encrypted_content 中。
+    """
+
+    encrypted_content: dict[str, Any] = Field(default_factory=dict)
+
+
 class RoomMemberEvent(NoticeEvent):
     @property
     def membership(self) -> str | None:
@@ -162,6 +172,7 @@ class SyncMetaEvent(MetaEvent):
 
 event_classes: dict[str, type[Event]] = {
     "m.room.message": RoomMessageEvent,
+    "m.room.encrypted": EncryptedRoomEvent,
     "m.room.member": RoomMemberEvent,
     "m.reaction": ReactionEvent,
     "m.room.redaction": RedactionEvent,
@@ -185,6 +196,7 @@ def event_from_raw(
 
 
 __all__ = (
+    "EncryptedRoomEvent",
     "Event",
     "EventType",
     "InviteEvent",

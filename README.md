@@ -188,8 +188,39 @@ MATRIX_TOKEN_STORE_PATH='.data/matrix-tokens.json'
   - 网络错误或 5xx：保留旧 refresh token，稍后重试。
   - 4xx 且带 `soft_logout: true`：若配置了 `login_password`，自动重新登录。
   - 4xx 无 `soft_logout`：视为会话失效，等待重试。
-- refresh 成功后更新内存中的 `access_token`、`refresh_token`、`access_token_expires_at_ms`，并写回状态文件。
-- adapter 不会回写 `.env` 或其他部署配置；`/sync` 的 `next_batch` 仍然不会持久化。
+- refresh 成功后更新内存中的 `access_token`、`refresh_token`、`access_token_expires_at_ms`，并写回状态 json 文件。
+- 注意，adapter 不会回写获取的 Token 到 `.env` 或其他 dotenv 文件；同样，`/sync` 的 `next_batch` 不会持久化。
+
+### 端到端加密 (E2EE)
+
+适配器支持 Matrix 端到端加密房间，使用 Olm/Megolm 协议进行消息加解密。E2EE 是 opt-in 的：只有配置了 `e2ee_store_path` 或 `MATRIX_TOKEN_STORE_PATH` 时才会启用。
+
+```dotenv
+MATRIX_BOTS='[
+  {
+    "homeserver": "https://matrix.example.org",
+    "access_token": "YOUR_ACCESS_TOKEN",
+    "user_id": "@bot:example.org",
+    "device_id": "BOTDEVICE",
+    "recovery_code": "EsTb ...",
+    "e2ee_store_path": ".data/e2ee_store"
+  }
+]'
+```
+
+- `recovery_code`：**MATRIX_RECOVERY_CODE**，用于从服务端密钥备份恢复 Megolm 会话密钥。格式为 base58 编码的 Curve25519 私钥，可以在 Element 等客户端的「安全与隐私」设置中找到。配置后，启动时自动从服务端备份恢复所有可解密的会话密钥，无需其他设备在线。
+- `e2ee_store_path`：E2EE 加密状态的持久化目录路径。为 `None`（默认）时，会从 `MATRIX_TOKEN_STORE_PATH` 同目录下自动派生一个子目录（如 `e2ee_<hash>_<user>`）。如果两者均未设置，E2EE 完全禁用。
+
+**E2EE 工作流程：**
+
+1. **启动时**：生成 Olm 设备密钥（Ed25519 + Curve25519），上传到 homeserver，确保一次性密钥 (OTK) 数量充足，上传 fallback 密钥作为备用。若配置了 `recovery_code`，从服务端密钥备份恢复 Megolm 会话。
+2. **进入加密房间**：当同步到 `m.room.encryption` 状态事件时，自动标记该房间为加密。首次向加密房间发送消息前，会通过 Olm to-device 消息向所有成员设备共享 Megolm 会话密钥。
+3. **收发加密消息**：发出的消息自动用 Megolm 加密后以 `m.room.encrypted` 事件发送；收到的加密消息自动解密为明文后再分派给插件处理。
+4. **设备列表跟踪**：自动处理 `/sync` 中的 `device_lists` 变更，查询新设备的密钥，保持设备密钥缓存更新。
+
+**注意事项：**
+- E2EE 依赖 `python-olm` 库（libolm 的 Python 绑定）。libolm 的 Olm session `from_pickle` 在某些平台/Python 版本上可能不可用，此时 Olm 会话不会跨重启持久化（不影响正常使用，仅影响重启后首次密钥共享的效率）。
+- 机器人目前不处理密钥验证（SAS/emoji），其他用户的设备标记为「未验证」不影响正常收发消息。
 
 ## 插件示例
 
@@ -240,6 +271,8 @@ async def handle_img_send():
 
 ```
 
+需要注意，`content_type` 字段需要传入**正确的 MIME Type** 才能在客户端显示！
+
 ### 常用 Matrix 操作
 
 ```python
@@ -273,13 +306,13 @@ MATRIX_BOTS='[
 - 黑名单优先级高于白名单：即使用户在白名单中，若同时出现在黑名单中也不会自动接受邀请。
 - 自动加入失败时仅记录错误日志，不会中断同步循环。
 
-## 当前范围
+## 当前实现范围
 
 当前实现面向 Matrix Client-Server bot 场景：
 
 - 通过 `/account/whoami` 校验身份。
 - 通过 `/sync` long-poll 接收 room timeline、state、typing、receipt 等事件。
 - 支持发送 `m.room.message`、上传媒体、reaction、redaction、typing、receipt 和 join room。
-- 不包含端到端加密房间支持。
+- 支持端到端加密房间 (E2EE)，可收发加密消息，支持通过 MATRIX_RECOVERY_CODE 从服务端密钥备份恢复会话。
 - 不包含 Matrix Application Service API。
 - 不持久化 `/sync` 的 `next_batch`；进程内重连会复用内存状态，跨进程重启默认丢弃早于本次启动时间的旧事件。

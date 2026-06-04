@@ -239,11 +239,55 @@ class JoinRoomResponse(MatrixBaseModel):
     room_id: RoomId
 
 
+# ------------------------------------------------------------------
+# E2EE 模型: m.room.encrypted 事件和 to-device 密钥消息
+# ------------------------------------------------------------------
+
+
+class EncryptedEventContent(MatrixBaseModel):
+    """m.room.encrypted 事件的内容。"""
+
+    algorithm: str
+    ciphertext: str
+    sender_key: str
+    session_id: str
+    device_id: str | None = None
+
+
+class RoomKeyContent(MatrixBaseModel):
+    """m.room_key to-device 消息的内容。
+
+    用于在设备间共享 Megolm 会话密钥。
+    """
+
+    algorithm: str
+    room_id: str
+    session_id: str
+    session_key: str
+
+
+class ForwardedRoomKeyContent(MatrixBaseModel):
+    """m.forwarded_room_key to-device 消息的内容。
+
+    包含额外的转发链信息。
+    """
+
+    algorithm: str
+    room_id: str
+    session_id: str
+    session_key: str
+    sender_key: str
+    sender_claimed_ed25519_key: str
+    forwarding_curve25519_chain: list[str] = Field(default_factory=list)
+
+
 __all__ = (
     "AccountData",
     "DeviceLists",
+    "EncryptedEventContent",
     "EventIdResponse",
     "File",
+    "ForwardedRoomKeyContent",
     "InvitedRoomSync",
     "JoinRoomResponse",
     "JoinedRoomSync",
@@ -268,6 +312,7 @@ __all__ = (
     "RefreshTokenRequest",
     "RefreshTokenResponse",
     "RelationsResponse",
+    "RoomKeyContent",
     "RoomMemberContent",
     "RoomMessageContent",
     "RoomsSync",

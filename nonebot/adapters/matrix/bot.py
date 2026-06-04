@@ -21,13 +21,14 @@ from .api import (
     UploadResponse,
     WhoamiResponse,
 )
-from .api.types import EventId, RoomIdentifier, UserId
+from .api.types import EventId, EventType, RoomIdentifier, TxnId, UserId
 from .config import BotInfo
 from .event import Event, MessageEvent
 from .message import build_message_content
 
 if TYPE_CHECKING:
     from .adapter import Adapter
+    from .crypto import CryptoEngine
 
 
 def make_txn_id() -> str:
@@ -52,6 +53,8 @@ class Bot(BaseBot, ApiClient):
         self.next_batch: str | None = None
         self.startup_time_ms = int(time() * 1000)
         self.direct_rooms: set[str] = set()
+        self.crypto: CryptoEngine | None = None
+        # E2EE crypto engine, initialized by Adapter.run_bot()
 
     @override
     def __repr__(self) -> str:
@@ -98,15 +101,46 @@ class Bot(BaseBot, ApiClient):
         message: str | BaseMessage | BaseMessageSegment,
         **kwargs: Any,  # noqa: ANN401
     ) -> EventIdResponse:
-        kwargs.update(
-            {
-                "txn_id": kwargs.get("txn_id") or make_txn_id(),
-                "content": await build_message_content(message, bot=self),
-            }
-        )
+        txn_id = kwargs.pop("txn_id", None) or make_txn_id()
+        content = await build_message_content(message, bot=self)
+
+        # If room has E2EE enabled, encrypt with Megolm and send as m.room.encrypted
+        if self.crypto is not None and self.crypto.is_room_encrypted(str(room_id)):
+            encrypted_content = await self.crypto.encrypt_room_message(
+                str(room_id), content
+            )
+            return await self.send_event(
+                room_id=room_id,
+                event_type="m.room.encrypted",
+                txn_id=txn_id,
+                content=encrypted_content,
+            )
+
         return await self.send_message(
             room_id=room_id,
-            **kwargs,
+            txn_id=txn_id,
+            content=content,
+        )
+
+    @override
+    async def send_event(
+        self,
+        *,
+        room_id: RoomIdentifier,
+        event_type: EventType,
+        txn_id: TxnId,
+        content: dict[str, Any],
+    ) -> EventIdResponse:
+        """Send an arbitrary room event via _api_send_event.
+
+        Supports custom event types such as m.room.encrypted.
+        """
+        return await self.call_api(  # type: ignore[return-value]
+            "send_event",
+            room_id=room_id,
+            event_type=event_type,
+            txn_id=txn_id,
+            content=content,
         )
 
     async def upload_media(

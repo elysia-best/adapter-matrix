@@ -12,7 +12,10 @@ readme = "README.md"
 keywords = ["nonebot", "matrix", "bot"]
 requires-python = ">=3.10,<4.0.0"
 dependencies = [
+    "base58>=2.1.1",
+    "cryptography>=48.0.0",
     "nonebot2>=2.4.4",
+    "python-olm>=3.2.16",
     "requests-oauth2client>=1.8.0",
 ]
 
@@ -118,12 +121,44 @@ flake8-quotes = { inline-quotes = "double", multiline-quotes = "double" }
     "S107",    # test tokens in default values are not real passwords
     "SLF001",  # tests need to access private members
     "ARG001",  # test fixtures sometimes have unused params
+    "ARG002",  # test fixtures sometimes have unused method args
     "PLC0415", # conditional imports for mocks
     "PLR0913", # test doubles need flexible constructors
     "PLR2004", # magic-value-comparison
+    "RUF002",  # Chinese fullwidth punctuation in docstrings
+    "RUF003",  # Chinese fullwidth punctuation in comments
+    "ERA001",  # Chinese comments that look like commented-out code
+    "RUF015",  # prefers list()[0] style for getting first item
 ]
 "nonebot/adapters/matrix/api/client.pyi" = [
     "A002", # Matrix API fields include names such as type and filter
+]
+"nonebot/adapters/matrix/crypto/*" = [
+    "RUF001", # Chinese fullwidth punctuation in log strings
+    "RUF002", # Chinese fullwidth punctuation in docstrings
+    "RUF003", # Chinese fullwidth punctuation in comments
+    "ERA001",  # Chinese comments that look like commented-out code
+    "SLF001",  # accessing adapter._api_* methods through object type
+    "ANN401",  # typing.Any for olm objects that have no type stubs
+    "PLR2004", # magic values from Matrix spec
+    "PLR0911", # too many returns in recovery decrypt logic
+    "PLC0415", # local imports for circular dependency avoidance
+    "PERF203", # try-except in crypto init loops (acceptable perf impact)
+    "SIM102",  # nested if in crypto load (clearer this way)
+    "TRY300",  # try-else style preference
+]
+"nonebot/adapters/matrix/event.py" = [
+    "RUF002", # Chinese fullwidth punctuation in docstrings
+]
+"nonebot/adapters/matrix/adapter.py" = [
+    "RUF001", # Chinese fullwidth punctuation in log strings
+    "RUF003", # Chinese fullwidth punctuation in comments
+    "ERA001",  # Chinese comments that look like commented-out code
+]
+"nonebot/adapters/matrix/api/handle.py" = [
+    "RUF002", # Chinese fullwidth punctuation in docstrings
+    "RUF003", # Chinese fullwidth punctuation in comments
+    "ERA001",  # Chinese comments that look like commented-out code
 ]
 
 [tool.ruff.lint.isort]

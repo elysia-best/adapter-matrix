@@ -36,6 +36,13 @@ class BotInfo(BaseModel):
     auto_accept_whitelist: list[str] | None = None  # None = all users allowed
     auto_accept_blacklist: list[str] = Field(default_factory=list)
 
+    # E2EE configuration
+    recovery_code: str | None = None
+    # MATRIX_RECOVERY_CODE: base58-encoded Curve25519 private key
+    # Used to restore Megolm sessions from server-side key backup
+    e2ee_store_path: str | None = None
+    # E2EE state persistence directory, derived from matrix_token_store_path when None
+
     # Runtime / persisted field
     session_type: str | None = None  # "legacy_login" | "oauth2" | None
     oauth_token_endpoint: str | None = None  # persisted for OAuth2 refresh

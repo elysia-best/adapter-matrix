@@ -642,3 +642,179 @@ class HandleMixin:
             ),
         )
         return type_validate_python(JoinRoomResponse, data)
+
+    # ------------------------------------------------------------------
+    # E2EE 端点: 设备密钥管理
+    # ------------------------------------------------------------------
+
+    async def _api_keys_upload(
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        device_keys: dict[str, Any] | None = None,
+        one_time_keys: dict[str, str] | None = None,
+        fallback_keys: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """上传设备身份密钥和/或一次性密钥。
+
+        POST /keys/upload
+
+        device_keys: 设备的 Ed25519/Curve25519 身份密钥 (带自签名)
+        one_time_keys: 用于 Olm 会话建立的 signed_curve25519 密钥
+        fallback_keys: 当 OTK 耗尽时使用的备用密钥
+        """
+        body: dict[str, Any] = {}
+        if device_keys is not None:
+            body["device_keys"] = device_keys
+        if one_time_keys is not None:
+            body["one_time_keys"] = one_time_keys
+        if fallback_keys is not None:
+            body["fallback_keys"] = fallback_keys
+        return await _request(
+            self,
+            bot.bot_info,
+            _json_request(
+                method="POST",
+                url=self.client_url(bot.bot_info, "/keys/upload"),
+                headers=_headers(self, bot.bot_info),
+                body=body,
+            ),
+        )
+
+    async def _api_keys_query(
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        device_keys: dict[str, list[str]],
+        timeout: int | None = None,
+    ) -> dict[str, Any]:
+        """查询指定用户的设备密钥。
+
+        POST /keys/query
+
+        device_keys: {user_id: [device_id, ...]} 空列表表示查询所有设备
+        """
+        body: dict[str, Any] = {"device_keys": device_keys}
+        if timeout is not None:
+            body["timeout"] = timeout
+        return await _request(
+            self,
+            bot.bot_info,
+            _json_request(
+                method="POST",
+                url=self.client_url(bot.bot_info, "/keys/query"),
+                headers=_headers(self, bot.bot_info),
+                body=body,
+            ),
+        )
+
+    async def _api_keys_claim(
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        one_time_keys: dict[str, dict[str, str]],
+        timeout: int | None = None,
+    ) -> dict[str, Any]:
+        """为指定设备索取一次性密钥用于 Olm 会话建立。
+
+        POST /keys/claim
+
+        one_time_keys: {user_id: {device_id: "signed_curve25519"}}
+        """
+        body: dict[str, Any] = {"one_time_keys": one_time_keys}
+        if timeout is not None:
+            body["timeout"] = timeout
+        return await _request(
+            self,
+            bot.bot_info,
+            _json_request(
+                method="POST",
+                url=self.client_url(bot.bot_info, "/keys/claim"),
+                headers=_headers(self, bot.bot_info),
+                body=body,
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # E2EE 端点: to-device 消息和密钥备份
+    # ------------------------------------------------------------------
+
+    async def _api_send_to_device(
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        event_type: str,
+        txn_id: str,
+        messages: dict[str, dict[str, Any]],
+    ) -> None:
+        """发送 to-device 消息给指定设备。
+
+        PUT /sendToDevice/{event_type}/{txn_id}
+
+        messages: {user_id: {device_id: content}}
+        """
+        await _request(
+            self,
+            bot.bot_info,
+            _json_request(
+                method="PUT",
+                url=self.client_url(
+                    bot.bot_info,
+                    f"/sendToDevice/{quote_path(event_type)}/{quote_path(txn_id)}",
+                ),
+                headers=_headers(self, bot.bot_info),
+                body={"messages": messages},
+            ),
+        )
+
+    async def _api_room_keys_version(
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        version: str | None = None,
+    ) -> dict[str, Any]:
+        """获取密钥备份的版本信息。
+
+        GET /room_keys/version[/{version}]
+        """
+        path = "/room_keys/version"
+        if version is not None:
+            path = f"{path}/{quote_path(version)}"
+        return await _request(
+            self,
+            bot.bot_info,
+            Request(
+                "GET",
+                self.client_url(bot.bot_info, path),
+                headers=_headers(self, bot.bot_info),
+            ),
+        )
+
+    async def _api_room_keys_keys(
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        room_id: str | None = None,
+        session_id: str | None = None,
+        version: str,
+    ) -> dict[str, Any]:
+        """从密钥备份中获取加密会话密钥。
+
+        GET /room_keys/keys[/{room_id}[/{session_id}]]?version={version}
+        """
+        path = "/room_keys/keys"
+        if room_id is not None:
+            path = f"{path}/{quote_path(room_id)}"
+            if session_id is not None:
+                path = f"{path}/{quote_path(session_id)}"
+        params = filter_unset_query({"version": version})
+        return await _request(
+            self,
+            bot.bot_info,
+            Request(
+                "GET",
+                self.client_url(bot.bot_info, path),
+                headers=_headers(self, bot.bot_info),
+                params=params,
+            ),
+        )

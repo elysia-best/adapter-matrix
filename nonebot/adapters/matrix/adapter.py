@@ -24,14 +24,17 @@ from nonebot.utils import escape_tag
 from .api.handle import HandleMixin
 from .api.model import (
     InvitedRoomSync,
+    JoinedRoomSync,
+    LeftRoomSync,
     LoginResponse,
     RawMatrixEvent,
     SyncResponse,
     WhoamiResponse,
 )
-from .api.types import UserId
+from .api.types import RoomId, UserId
 from .bot import Bot
 from .config import BotInfo, Config
+from .crypto import CryptoEngine
 from .event import InviteEvent, LeaveEvent, event_from_raw
 from .exception import (
     ApiNotAvailable,
@@ -737,6 +740,23 @@ class Adapter(BaseAdapter, HandleMixin):
             try:
                 self_info = await self._bootstrap_bot(bot_info)
                 bot = Bot(self, str(self_info.user_id), bot_info, self_info)
+
+                # 初始化 E2EE 加密引擎 (如果配置了存储路径)
+                if (
+                    bot_info.e2ee_store_path
+                    or self.matrix_config.matrix_token_store_path
+                ):
+                    try:
+                        bot.crypto = CryptoEngine(bot, self)
+                        await bot.crypto.initialize()
+                    except Exception as e:
+                        log(
+                            "WARNING",
+                            f"E2EE 加密引擎初始化失败，将以明文模式运行: "
+                            f"{type(e).__name__}: {e}",
+                        )
+                        bot.crypto = None
+
                 self.bot_connect(bot)
                 log("INFO", f"Matrix bot {escape_tag(bot.self_id)} connected")
                 await self._sync_loop(bot)
@@ -814,36 +834,88 @@ class Adapter(BaseAdapter, HandleMixin):
                 await asyncio.sleep(self.matrix_config.matrix_retry_interval)
 
     async def _handle_sync(self, bot: Bot, sync: SyncResponse) -> None:
+        await self._handle_e2ee_sync_data(bot, sync)
         self._update_direct_rooms(bot, sync.account_data.events)
         for room_id, room in sync.rooms.join.items():
             self._update_direct_rooms(bot, room.account_data.events)
-            for raw in [*room.state.events, *room.timeline.events]:
-                await self._dispatch_room_event(bot, raw, room_id=str(room_id))
-            for raw in room.ephemeral.events:
-                await self._dispatch_room_event(bot, raw, room_id=str(room_id))
+            await self._handle_joined_room(bot, room_id, room)
         for room_id, room in sync.rooms.invite.items():
-            event = InviteEvent(type="m.room.invite", room_id=room_id, content={})
-            await bot.handle_event(event)
-            for raw in room.invite_state.events:
-                await self._dispatch_room_event(bot, raw, room_id=str(room_id))
-            inviter = self._get_inviter(bot, room)
-            if inviter is not None and self._should_accept_invite(bot, inviter):
-                log(
-                    "INFO",
-                    f"Auto-accepting invite to room {room_id} from {inviter}",
-                )
-                try:
-                    await self._api_join_room(bot, room_id=room_id)
-                except Exception as e:
-                    log(
-                        "ERROR",
-                        f"Failed to auto-join room {room_id}: {type(e).__name__}: {e}",
-                    )
+            await self._handle_invited_room(bot, room_id, room)
         for room_id, room in sync.rooms.leave.items():
-            event = LeaveEvent(type="m.room.leave", room_id=room_id, content={})
-            await bot.handle_event(event)
-            for raw in [*room.state.events, *room.timeline.events]:
-                await self._dispatch_room_event(bot, raw, room_id=str(room_id))
+            await self._handle_left_room(bot, room_id, room)
+
+    async def _handle_e2ee_sync_data(self, bot: Bot, sync: SyncResponse) -> None:
+        """Process device_lists and to_device events for E2EE."""
+        if sync.device_lists is not None and bot.crypto is not None:
+            await bot.crypto.handle_device_lists(
+                changed=[str(u) for u in sync.device_lists.changed],
+                left=[str(u) for u in sync.device_lists.left],
+            )
+
+        if sync.to_device is not None and bot.crypto is not None:
+            await self._handle_to_device_events(bot, sync.to_device.events)
+
+    async def _handle_to_device_events(
+        self, bot: Bot, events: list[RawMatrixEvent]
+    ) -> None:
+        """Process to-device messages for E2EE key exchange."""
+        for raw in events:
+            if bot.crypto is None:
+                break
+            await self._try_handle_to_device(bot, raw)
+
+    async def _try_handle_to_device(self, bot: Bot, raw: RawMatrixEvent) -> None:
+        if bot.crypto is None:
+            return
+        try:
+            await bot.crypto.handle_to_device_event(raw)
+        except Exception as e:
+            log(
+                "WARNING",
+                f"handle to-device event failed: {type(e).__name__}: {e}",
+            )
+
+    async def _handle_joined_room(
+        self, bot: Bot, room_id: RoomId, room: JoinedRoomSync
+    ) -> None:
+        """Process events for a joined room, including E2EE state detection."""
+        for raw in room.state.events:
+            if raw.type == "m.room.encryption" and bot.crypto is not None:
+                algorithm = raw.content.get("algorithm", "m.megolm.v1.aes-sha2")
+                bot.crypto.mark_room_as_encrypted(str(room_id), algorithm)
+            await self._dispatch_room_event(bot, raw, room_id=str(room_id))
+        for raw in room.timeline.events:
+            await self._dispatch_room_event(bot, raw, room_id=str(room_id))
+        for raw in room.ephemeral.events:
+            await self._dispatch_room_event(bot, raw, room_id=str(room_id))
+
+    async def _handle_invited_room(
+        self, bot: Bot, room_id: RoomId, room: InvitedRoomSync
+    ) -> None:
+        """Process events for an invited room and optionally auto-join."""
+        event = InviteEvent(type="m.room.invite", room_id=room_id, content={})
+        await bot.handle_event(event)
+        for raw in room.invite_state.events:
+            await self._dispatch_room_event(bot, raw, room_id=str(room_id))
+        inviter = self._get_inviter(bot, room)
+        if inviter is not None and self._should_accept_invite(bot, inviter):
+            log("INFO", f"Auto-accepting invite to room {room_id} from {inviter}")
+            try:
+                await self._api_join_room(bot, room_id=room_id)
+            except Exception as e:
+                log(
+                    "ERROR",
+                    f"Failed to auto-join room {room_id}: {type(e).__name__}: {e}",
+                )
+
+    async def _handle_left_room(
+        self, bot: Bot, room_id: RoomId, room: LeftRoomSync
+    ) -> None:
+        """Process events for a left room."""
+        event = LeaveEvent(type="m.room.leave", room_id=room_id, content={})
+        await bot.handle_event(event)
+        for raw in [*room.state.events, *room.timeline.events]:
+            await self._dispatch_room_event(bot, raw, room_id=str(room_id))
 
     def _get_inviter(self, bot: Bot, room: InvitedRoomSync) -> str | None:
         """Extract the inviter's user ID from an invited room's state events."""
@@ -888,6 +960,23 @@ class Adapter(BaseAdapter, HandleMixin):
     ) -> None:
         if self._is_old_event(bot, raw):
             return
+
+        # 解密 m.room.encrypted 事件
+        if raw.type == "m.room.encrypted" and bot.crypto is not None:
+            try:
+                decrypted = await bot.crypto.decrypt_room_event(raw, room_id=room_id)
+                if decrypted is not None:
+                    raw = decrypted
+                else:
+                    # Unable to decrypt (missing session key), skip dispatch
+                    return
+            except Exception as e:
+                log(
+                    "WARNING",
+                    f"解密房间事件失败 ({room_id}): {type(e).__name__}: {e}",
+                )
+                return
+
         if (
             raw.sender == bot.user_id
             and not self.matrix_config.matrix_handle_self_message
