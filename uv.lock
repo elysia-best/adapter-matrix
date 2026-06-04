@@ -766,7 +766,7 @@ requires-dist = [
     { name = "base58", specifier = ">=2.1.1" },
     { name = "cryptography", specifier = ">=48.0.0" },
     { name = "nonebot2", specifier = ">=2.4.4" },
-    { name = "python-olm", specifier = ">=3.2.16" },
+    { name = "python-olm", git = "https://github.com/elysia-best/olm.git?subdirectory=python&rev=c366100bc79ac16e13d4fd7eb2b1d2064aa555f7" },
     { name = "requests-oauth2client", specifier = ">=1.8.0" },
 ]
 
@@ -1269,21 +1269,9 @@ wheels = [
 [[package]]
 name = "python-olm"
 version = "3.2.16"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/elysia-best/olm.git?subdirectory=python&rev=c366100bc79ac16e13d4fd7eb2b1d2064aa555f7#c366100bc79ac16e13d4fd7eb2b1d2064aa555f7" }
 dependencies = [
     { name = "cffi" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b8/eb/23ca73cbdc8c7466a774e515dfd917d9fbe747c1257059246fdc63093f04/python-olm-3.2.16.tar.gz", hash = "sha256:a1c47fce2505b7a16841e17694cbed4ed484519646ede96ee9e89545a49643c9", size = 2705522, upload-time = "2023-11-28T19:26:40.578Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/95/38/ac79c3d5b7d1a3c09807b467692b26c61527e4733b6de4db908525b16465/python_olm-3.2.16-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:c10e94f1369f6ffa3dae2cc8f74757a6c050cefeb4f59ba10f95da0195e88329", size = 293071, upload-time = "2023-11-28T19:24:52.365Z" },
-    { url = "https://files.pythonhosted.org/packages/f9/27/bbdfa8f2c146604888ee64bcd945f5c772217d1ab63bdd0ac5aa11908bd8/python_olm-3.2.16-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:2fd199908833349551931686ebdd983fdd9cf01bd2f98fd1991ccf99ed2a7049", size = 300754, upload-time = "2023-11-28T19:24:57.824Z" },
-    { url = "https://files.pythonhosted.org/packages/cc/57/97c2b0c8df19136e7ae0ebc3647866cf9b704d54a3d96d65949e250d1204/python_olm-3.2.16-cp310-cp310-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:989af27a123ac0cb5c56269097e8ce879185ecc46d0c18b849ded43c8944f423", size = 296358, upload-time = "2023-11-28T19:25:03.012Z" },
-    { url = "https://files.pythonhosted.org/packages/6a/5c/34af434e8397503ded1d5e88d9bfef791cfa650e51aee5bbc74f9fe9595b/python_olm-3.2.16-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:7c528a71df69db23ede6651d149c691c569cf852ddd16a28d1d1bdf923ccbfa6", size = 293049, upload-time = "2023-11-28T19:25:08.213Z" },
-    { url = "https://files.pythonhosted.org/packages/a8/50/da98e66dee3f0384fa0d350aa3e60865f8febf86e14dae391f89b626c4b7/python_olm-3.2.16-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:d41ce8cf04bfe0986c802986d04d2808fbb0f8ddd7a5a53c1f2eef7a9db76ae1", size = 300758, upload-time = "2023-11-28T19:25:12.62Z" },
-    { url = "https://files.pythonhosted.org/packages/6e/d9/a0294653a8b34470c8a5c5316397bbbbd39f6406aea031eec60c638d3169/python_olm-3.2.16-cp311-cp311-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:6862318d4970de508db8b84ad432e2f6b29286f91bfc136020cbb2aa2cf726fc", size = 296357, upload-time = "2023-11-28T19:25:17.228Z" },
-    { url = "https://files.pythonhosted.org/packages/6b/56/652349f97dc2ce6d1aed43481d179c775f565e68796517836406fb7794c7/python_olm-3.2.16-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:16bbb209d43d62135450696526ed0a811150e9de9df32ed91542bf9434e79030", size = 293671, upload-time = "2023-11-28T19:25:21.525Z" },
-    { url = "https://files.pythonhosted.org/packages/39/ee/1e15304ac67d3a7ebecbcac417d6479abb7186aad73c6a035647938eaa8e/python_olm-3.2.16-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:45e76b3f5060a5cf8451140d6c7e3b438f972ff432b6f39d0ca2c7f2296509bb", size = 301030, upload-time = "2023-11-28T19:25:26.634Z" },
-    { url = "https://files.pythonhosted.org/packages/79/93/f6729f10149305262194774d6c8b438c0b084740cf239f48ab97b4df02fa/python_olm-3.2.16-cp312-cp312-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:10a5e68a2f4b5a2bfa5fdb5dbfa22396a551730df6c4a572235acaa96e997d3f", size = 297000, upload-time = "2023-11-28T19:25:31.045Z" },
 ]
 
 [[package]]

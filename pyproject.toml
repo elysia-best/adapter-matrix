@@ -46,6 +46,9 @@ documentation = "https://github.com/nonebot/adapter-matrix"
 module-name = "nonebot.adapters.matrix"
 module-root = ""
 
+[tool.uv.sources]
+python-olm = { git = "https://github.com/elysia-best/olm.git", subdirectory = "python", rev = "c366100bc79ac16e13d4fd7eb2b1d2064aa555f7" }
+
 [tool.ruff]
 line-length = 88
 target-version = "py310"
