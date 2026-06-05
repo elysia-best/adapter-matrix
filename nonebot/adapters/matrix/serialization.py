@@ -69,6 +69,32 @@ def prepare_request(  # noqa: PLR0913
     )
 
 
+def _strip_matrix_signature_fields(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: _strip_matrix_signature_fields(item)
+            for key, item in value.items()
+            if key not in {"signatures", "unsigned"}
+        }
+    if isinstance(value, list):
+        return [_strip_matrix_signature_fields(item) for item in value]
+    return value
+
+
+def encode_matrix_canonical_json(value: object) -> str:
+    """Encode JSON using Matrix canonical signing rules.
+
+    The Matrix spec requires JSON objects to be signed without `signatures`
+    or `unsigned`, using a compact canonical representation.
+    """
+    return json.dumps(
+        _strip_matrix_signature_fields(value),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
 def encode_json_text(value: object) -> str:
     if PYDANTIC_V2:
         return _JSON_ADAPTER.dump_json(value).decode()

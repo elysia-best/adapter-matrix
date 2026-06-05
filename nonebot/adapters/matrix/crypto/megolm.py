@@ -89,6 +89,10 @@ class MegolmManager:
             self._save_outbound()
         return session
 
+    def get_outbound_session_id(self, room_id: str) -> str:
+        """返回房间当前出站 Megolm 会话的 session_id。"""
+        return self.get_outbound_session(room_id).id
+
     def encrypt(self, room_id: str, plaintext: str) -> dict:
         """用 Megolm 加密明文，返回 m.room.encrypted 事件的内容。
 
@@ -196,7 +200,7 @@ class MegolmManager:
         room_id: str,
         device_id: str,  # noqa: ARG002
         members: list[str],
-    ) -> None:
+    ) -> int:
         """向房间的所有成员设备共享当前出站 Megolm 会话密钥。
 
         通过 Olm 加密的 m.room_key to-device 消息发送。
@@ -215,6 +219,8 @@ class MegolmManager:
 
         account = self._account()
         my_curve25519 = account.identity_keys["curve25519"]
+        my_device_keys = self._session_mgr._account_mgr.build_device_keys(bot)
+        my_ed25519 = account.identity_keys["ed25519"]
 
         # 收集要发送的 to-device 消息
         to_device_messages: dict[str, dict[str, dict]] = {}
@@ -249,15 +255,28 @@ class MegolmManager:
                 if olm_session is None:
                     continue
 
+                their_ed25519 = dev_info.get("keys", {}).get(f"ed25519:{dev_id}")
+                if not isinstance(their_ed25519, str):
+                    continue
+
                 # 构建 m.room_key 负载
                 room_key_payload = {
-                    "type": "m.room_key",
                     "content": {
                         "algorithm": "m.megolm.v1.aes-sha2",
                         "room_id": room_id,
                         "session_id": session_id,
                         "session_key": session_key,
                     },
+                    "keys": {
+                        "ed25519": my_ed25519,
+                    },
+                    "recipient": user_id,
+                    "recipient_keys": {
+                        "ed25519": their_ed25519,
+                    },
+                    "sender": str(bot.user_id),
+                    "sender_device_keys": my_device_keys,
+                    "type": "m.room_key",
                 }
                 import json
 
@@ -271,27 +290,30 @@ class MegolmManager:
                     "ciphertext": {
                         their_curve25519: {
                             "body": encrypted_msg.ciphertext,
-                            "type": encrypted_msg.type,
+                            "type": encrypted_msg.message_type,
                         },
                     },
                 }
 
-        if to_device_messages:
-            import uuid
+        if not to_device_messages:
+            return 0
 
-            txn_id = uuid.uuid4().hex
-            await adapter._api_send_to_device(  # type: ignore[union-attr]
-                bot,
-                event_type="m.room.encrypted",
-                txn_id=txn_id,
-                messages=to_device_messages,
-            )
-            total_devices = sum(len(d) for d in to_device_messages.values())
-            log(
-                "TRACE",
-                f"已向 {len(to_device_messages)} 个用户的 "
-                f"{total_devices} 个设备共享房间 {room_id} 的 Megolm 密钥",
-            )
+        import uuid
+
+        txn_id = uuid.uuid4().hex
+        await adapter._api_send_to_device(  # type: ignore[union-attr]
+            bot,
+            event_type="m.room.encrypted",
+            txn_id=txn_id,
+            messages=to_device_messages,
+        )
+        total_devices = sum(len(d) for d in to_device_messages.values())
+        log(
+            "TRACE",
+            f"已向 {len(to_device_messages)} 个用户的 "
+            f"{total_devices} 个设备共享房间 {room_id} 的 Megolm 密钥",
+        )
+        return total_devices
 
     # ------------------------------------------------------------------
     # 内部辅助

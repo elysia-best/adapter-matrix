@@ -74,6 +74,8 @@ class CryptoEngine:
 
         # 房间加密状态缓存
         self._room_encrypted: dict[str, dict] = {}
+        # {room_id: session_id}，记录当前 outbound session 是否已共享过
+        self._shared_outbound_sessions: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # 初始化
@@ -99,13 +101,20 @@ class CryptoEngine:
         self._room_encrypted = self._store.load_room_state()
 
         # 4-6: 上传密钥到 homeserver
+        identity_upload: dict[str, object] = {}
         try:
-            await self._account.upload_identity_keys(self._adapter, self._bot)
+            identity_upload = await self._account.upload_identity_keys(
+                self._adapter, self._bot
+            )
         except Exception as e:
             log("WARNING", f"上传设备身份密钥失败: {type(e).__name__}: {e}")
 
         try:
-            await self._account.ensure_one_time_keys(self._adapter, self._bot)
+            await self._account.ensure_one_time_keys(
+                self._adapter,
+                self._bot,
+                key_upload_response=identity_upload,
+            )
         except Exception as e:
             log("WARNING", f"补充一次性密钥失败: {type(e).__name__}: {e}")
 
@@ -320,6 +329,44 @@ class CryptoEngine:
     # 消息加密/解密
     # ------------------------------------------------------------------
 
+    async def prepare_room_encryption(self, room_id: str) -> None:
+        """在首次向加密房间发送消息前共享当前 Megolm 会话密钥。"""
+        session_id = self._megolm.get_outbound_session_id(room_id)
+        if self._shared_outbound_sessions.get(room_id) == session_id:
+            return
+
+        members_response = await self._adapter._api_get_room_members(  # type: ignore[union-attr]
+            self._bot,
+            room_id=room_id,
+            membership="join",
+        )
+        members = [
+            raw.state_key
+            for raw in members_response.chunk
+            if raw.type == "m.room.member"
+            and raw.state_key is not None
+            and raw.content.get("membership") == "join"
+        ]
+        other_members = [uid for uid in members if uid != str(self._bot.user_id)]
+        if not other_members:
+            self._shared_outbound_sessions[room_id] = session_id
+            return
+
+        self._device_keys.mark_for_query(other_members)
+        await self._device_keys.query_keys(self._adapter, self._bot)
+
+        shared_devices = await self._megolm.share_session_key(
+            self._adapter,
+            self._bot,
+            room_id,
+            self._bot.device_id or "",
+            other_members,
+        )
+        if shared_devices > 0:
+            self._shared_outbound_sessions[room_id] = session_id
+        else:
+            log("WARNING", f"房间 {room_id} 未能向任何设备共享 Megolm 密钥")
+
     async def encrypt_room_message(
         self, room_id: str, content: dict[str, Any]
     ) -> dict[str, Any]:
@@ -332,7 +379,14 @@ class CryptoEngine:
         Returns:
             m.room.encrypted 事件的内容字典
         """
-        plaintext = json.dumps(content, ensure_ascii=False)
+        plaintext = json.dumps(
+            {
+                "type": "m.room.message",
+                "content": content,
+                "room_id": room_id,
+            },
+            ensure_ascii=False,
+        )
         encrypted = self._megolm.encrypt(room_id, plaintext)
         # 填充 device_id
         device_id = self._bot.device_id or ""
@@ -395,17 +449,30 @@ class CryptoEngine:
             return None
 
         # 解码解密后的 JSON 内容
+        decrypted_type = "m.room.message"
+        decrypted_content: dict[str, Any] = {
+            "body": plaintext,
+            "msgtype": "m.text",
+        }
         try:
-            decrypted_content = json.loads(plaintext)
+            decrypted_payload = json.loads(plaintext)
         except json.JSONDecodeError:
-            decrypted_content = {
-                "body": plaintext,
-                "msgtype": "m.text",
-            }
+            pass
+        else:
+            if isinstance(decrypted_payload, dict):
+                payload_type = decrypted_payload.get("type")
+                if isinstance(payload_type, str):
+                    decrypted_type = payload_type
+                nested_content = decrypted_payload.get("content")
+                if isinstance(nested_content, dict):
+                    decrypted_content = dict(nested_content)
+                else:
+                    decrypted_content = dict(decrypted_payload)
+                    decrypted_content.pop("type", None)
 
         # 构建解密的 RawMatrixEvent，保留原始元数据
         return RawMatrixEvent(
-            type=decrypted_content.pop("type", "m.room.message"),
+            type=decrypted_type,
             content=decrypted_content,
             event_id=raw.event_id,
             sender=raw.sender,

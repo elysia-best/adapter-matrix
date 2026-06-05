@@ -1,4 +1,6 @@
 from collections.abc import Sequence
+from pathlib import Path
+import tempfile
 from typing_extensions import override
 
 from nonebot.adapters.matrix.adapter import Adapter
@@ -52,9 +54,12 @@ class DummyBot(Bot):
         refresh_before_expiry_ms: int = 60000,
         user_id: str = "@bot:example.org",
         device_id: str | None = None,
+        e2ee_store_path: str | None = None,
     ) -> None:
         if adapter is None:
             adapter = DummyAdapter()
+        if e2ee_store_path is None:
+            e2ee_store_path = tempfile.mkdtemp(prefix="matrix-e2ee-")
         bot_info = BotInfo(
             homeserver=homeserver,
             access_token=access_token,
@@ -63,6 +68,7 @@ class DummyBot(Bot):
             refresh_before_expiry_ms=refresh_before_expiry_ms,
             user_id=user_id,
             device_id=device_id,
+            e2ee_store_path=str(Path(e2ee_store_path)),
         )
         super().__init__(
             adapter=adapter,

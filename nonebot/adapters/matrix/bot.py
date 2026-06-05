@@ -106,6 +106,7 @@ class Bot(BaseBot, ApiClient):
 
         # If room has E2EE enabled, encrypt with Megolm and send as m.room.encrypted
         if self.crypto is not None and self.crypto.is_room_encrypted(str(room_id)):
+            await self.crypto.prepare_room_encryption(str(room_id))
             encrypted_content = await self.crypto.encrypt_room_message(
                 str(room_id), content
             )

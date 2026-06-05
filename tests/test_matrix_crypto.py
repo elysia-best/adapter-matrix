@@ -6,11 +6,14 @@ import json
 from pathlib import Path
 import tempfile
 
+from nonebot.adapters.matrix.api.model import RawMatrixEvent
+from nonebot.adapters.matrix.crypto import CryptoEngine
 from nonebot.adapters.matrix.crypto.account import OlmAccountManager
 from nonebot.adapters.matrix.crypto.device_keys import DeviceKeyStore
 from nonebot.adapters.matrix.crypto.megolm import MegolmManager
 from nonebot.adapters.matrix.crypto.sessions import OlmSessionManager
 from nonebot.adapters.matrix.crypto.store import CryptoStore
+from nonebot.adapters.matrix.serialization import encode_matrix_canonical_json
 from tests.fake.doubles import DummyAdapter, DummyBot
 
 import olm
@@ -204,6 +207,119 @@ class TestOlmAccountManager:
         if "curve25519" in fallback:
             assert len(fallback["curve25519"]) == 1
 
+    def test_encode_matrix_canonical_json_strips_signature_fields(self) -> None:
+        payload = {
+            "z": {"unsigned": {"age": 1}, "a": 1},
+            "signatures": {"@alice:example.org": {"ed25519:DEV": "sig"}},
+            "a": 2,
+        }
+        encoded = encode_matrix_canonical_json(payload)
+        assert encoded == '{"a":2,"z":{"a":1}}'
+
+    @pytest.mark.asyncio
+    async def test_upload_identity_keys_uses_signed_device_keys(
+        self,
+        account_mgr: OlmAccountManager,
+        dummy_adapter: DummyAdapter,
+        dummy_bot: DummyBot,
+    ) -> None:
+        dummy_adapter.content = json.dumps(
+            {"one_time_key_counts": {"signed_curve25519": 7}}
+        ).encode("utf-8")
+
+        await account_mgr.upload_identity_keys(dummy_adapter, dummy_bot)
+
+        request = dummy_adapter.request_calls[-1]
+        device_keys = request.json["device_keys"]
+        assert "signatures" in device_keys
+        assert device_keys["device_id"] == "TESTDEVICE"
+        assert set(device_keys["keys"].keys()) == {
+            "ed25519:TESTDEVICE",
+            "curve25519:TESTDEVICE",
+        }
+
+    @pytest.mark.asyncio
+    async def test_upload_one_time_keys_uses_signed_key_objects(
+        self,
+        account_mgr: OlmAccountManager,
+        dummy_adapter: DummyAdapter,
+        dummy_bot: DummyBot,
+    ) -> None:
+        dummy_adapter.content = json.dumps(
+            {"one_time_key_counts": {"signed_curve25519": 12}}
+        ).encode("utf-8")
+
+        await account_mgr.upload_one_time_keys(dummy_adapter, dummy_bot, count=1)
+
+        request = dummy_adapter.request_calls[-1]
+        key_object = next(iter(request.json["one_time_keys"].values()))
+        assert key_object["key"]
+        assert "signatures" in key_object
+        assert "fallback" not in key_object
+
+    @pytest.mark.asyncio
+    async def test_upload_fallback_key_uses_signed_key_object(
+        self,
+        account_mgr: OlmAccountManager,
+        dummy_adapter: DummyAdapter,
+        dummy_bot: DummyBot,
+    ) -> None:
+        dummy_adapter.content = json.dumps(
+            {"one_time_key_counts": {"signed_curve25519": 12}}
+        ).encode("utf-8")
+
+        await account_mgr.upload_fallback_key(dummy_adapter, dummy_bot)
+
+        request = dummy_adapter.request_calls[-1]
+        key_object = next(iter(request.json["fallback_keys"].values()))
+        assert key_object["key"]
+        assert key_object["fallback"] is True
+        assert "signatures" in key_object
+
+    @pytest.mark.asyncio
+    async def test_ensure_one_time_keys_uses_server_counts(
+        self,
+        account_mgr: OlmAccountManager,
+        dummy_adapter: DummyAdapter,
+        dummy_bot: DummyBot,
+    ) -> None:
+        dummy_adapter.content = json.dumps(
+            {"one_time_key_counts": {"signed_curve25519": 50}}
+        ).encode("utf-8")
+
+        result = await account_mgr.ensure_one_time_keys(
+            dummy_adapter,
+            dummy_bot,
+            key_upload_response={"one_time_key_counts": {"signed_curve25519": 10}},
+            threshold=10,
+            count=50,
+        )
+
+        assert result == {}
+        assert dummy_adapter.request_calls == []
+
+    @pytest.mark.asyncio
+    async def test_ensure_one_time_keys_uploads_when_server_count_low(
+        self,
+        account_mgr: OlmAccountManager,
+        dummy_adapter: DummyAdapter,
+        dummy_bot: DummyBot,
+    ) -> None:
+        dummy_adapter.content = json.dumps(
+            {"one_time_key_counts": {"signed_curve25519": 50}}
+        ).encode("utf-8")
+
+        await account_mgr.ensure_one_time_keys(
+            dummy_adapter,
+            dummy_bot,
+            key_upload_response={"one_time_key_counts": {"signed_curve25519": 2}},
+            threshold=10,
+            count=20,
+        )
+
+        request = dummy_adapter.request_calls[-1]
+        assert len(request.json["one_time_keys"]) == 18
+
 
 # ------------------------------------------------------------------
 # OlmSessionManager
@@ -354,6 +470,45 @@ class TestMegolmManager:
         megolm_mgr.add_inbound_session(room_id, session_id, session_key)
         decrypted = megolm_mgr.decrypt(room_id, session_id, encrypted["ciphertext"])
         assert decrypted == plaintext
+
+    def test_decrypt_room_event_extracts_nested_content(
+        self,
+        dummy_adapter: DummyAdapter,
+        dummy_bot: DummyBot,
+    ) -> None:
+        engine = CryptoEngine(dummy_bot, dummy_adapter)
+        engine._account.load_or_create()
+        engine._sessions.load()
+        engine._megolm.load()
+        engine._device_keys.load()
+
+        room_id = "!room:example.org"
+        plaintext = json.dumps(
+            {
+                "type": "m.room.message",
+                "content": {"body": "Hello E2EE", "msgtype": "m.text"},
+            }
+        )
+        out_session = engine._megolm.get_outbound_session(room_id)
+        session_key = out_session.session_key
+        encrypted = engine._megolm.encrypt(room_id, plaintext)
+        session_id = encrypted["session_id"]
+        engine._megolm.add_inbound_session(room_id, session_id, session_key)
+
+        raw = engine._decrypt_megolm(
+            RawMatrixEvent(
+                type="m.room.encrypted",
+                content=encrypted,
+                room_id=room_id,
+                sender="@alice:example.org",
+            ),
+            room_id,
+            encrypted,
+        )
+
+        assert raw is not None
+        assert raw.type == "m.room.message"
+        assert raw.content == {"body": "Hello E2EE", "msgtype": "m.text"}
 
     def test_add_inbound_session_via_import(self, megolm_mgr: MegolmManager) -> None:
         outro = megolm_mgr.get_outbound_session("!room:example.org")
@@ -516,6 +671,128 @@ class TestDeviceKeyStore:
 # ------------------------------------------------------------------
 # OlmSessionManager in-device test (Megolm key sharing simulation)
 # ------------------------------------------------------------------
+
+
+class TestCryptoEngine:
+    @pytest.mark.asyncio
+    async def test_encrypt_room_message_wraps_room_event_payload(
+        self,
+        dummy_adapter: DummyAdapter,
+        dummy_bot: DummyBot,
+    ) -> None:
+        engine = CryptoEngine(dummy_bot, dummy_adapter)
+        engine._account.load_or_create()
+        engine._sessions.load()
+        engine._megolm.load()
+        engine._device_keys.load()
+
+        room_id = "!room:example.org"
+        event_content = {
+            "body": "image.png",
+            "msgtype": "m.image",
+            "url": "mxc://example.org/image",
+        }
+        outbound = engine._megolm.get_outbound_session(room_id)
+        session_key = outbound.session_key
+        encrypted = await engine.encrypt_room_message(room_id, event_content)
+
+        session_id = encrypted["session_id"]
+        ciphertext = encrypted["ciphertext"]
+        engine._megolm.add_inbound_session(room_id, session_id, session_key)
+        decrypted = engine._megolm.decrypt(room_id, session_id, ciphertext)
+
+        assert decrypted is not None
+        assert json.loads(decrypted) == {
+            "type": "m.room.message",
+            "content": event_content,
+            "room_id": room_id,
+        }
+
+    @pytest.mark.asyncio
+    async def test_prepare_room_encryption_shares_only_once_per_session(self) -> None:
+        peer = olm.Account()
+        peer.generate_one_time_keys(1)
+        otk_id = next(iter(peer.one_time_keys["curve25519"].keys()))
+        otk = peer.one_time_keys["curve25519"][otk_id]
+        members_payload = {
+            "chunk": [
+                {
+                    "type": "m.room.member",
+                    "state_key": "@alice:example.org",
+                    "content": {"membership": "join"},
+                },
+                {
+                    "type": "m.room.member",
+                    "state_key": "@bot:example.org",
+                    "content": {"membership": "join"},
+                },
+            ]
+        }
+        key_query_payload = {
+            "device_keys": {
+                "@alice:example.org": {
+                    "ALICEDEV": {
+                        "keys": {
+                            "ed25519:ALICEDEV": peer.identity_keys["ed25519"],
+                            "curve25519:ALICEDEV": peer.identity_keys["curve25519"],
+                        },
+                        "algorithms": ["m.megolm.v1.aes-sha2"],
+                    }
+                }
+            }
+        }
+        key_claim_payload = {
+            "one_time_keys": {
+                "@alice:example.org": {
+                    "ALICEDEV": {
+                        f"signed_curve25519:{otk_id}": {"key": otk}
+                    }
+                }
+            }
+        }
+        adapter = DummyAdapter(
+            responses=[
+                (200, json.dumps(members_payload).encode("utf-8")),
+                (200, json.dumps(key_query_payload).encode("utf-8")),
+                (200, json.dumps(key_claim_payload).encode("utf-8")),
+                (200, b"{}"),
+            ]
+        )
+        bot = DummyBot(adapter=adapter, device_id="TESTDEVICE")
+        engine = CryptoEngine(bot, adapter)
+        engine._account.load_or_create()
+        engine._sessions.load()
+        engine._megolm.load()
+        engine._device_keys.load()
+
+        await engine.prepare_room_encryption("!room:example.org")
+        assert len(adapter.request_calls) == 4
+        assert str(adapter.request_calls[0].url).endswith("/members?membership=join")
+        assert str(adapter.request_calls[1].url).endswith("/keys/query")
+        assert str(adapter.request_calls[2].url).endswith("/keys/claim")
+        assert "/sendToDevice/m.room.encrypted/" in str(adapter.request_calls[3].url)
+
+        to_device_request = adapter.request_calls[3]
+        encrypted_payload = next(
+            iter(next(iter(to_device_request.json["messages"].values())).values())
+        )
+        ciphertext_entry = next(iter(encrypted_payload["ciphertext"].values()))
+        olm_message = olm.OlmPreKeyMessage(ciphertext_entry["body"])
+        peer_session = olm.InboundSession(
+            peer,
+            olm_message,
+            identity_key=encrypted_payload["sender_key"],
+        )
+        plaintext = peer_session.decrypt(olm_message)
+        room_key_payload = json.loads(plaintext)
+        assert room_key_payload["type"] == "m.room_key"
+        assert room_key_payload["sender"] == "@bot:example.org"
+        assert room_key_payload["recipient"] == "@alice:example.org"
+        assert room_key_payload["recipient_keys"]["ed25519"] == peer.identity_keys["ed25519"]
+        assert room_key_payload["sender_device_keys"]["device_id"] == "TESTDEVICE"
+
+        await engine.prepare_room_encryption("!room:example.org")
+        assert len(adapter.request_calls) == 4
 
 
 class TestOlmKeySharingSimulation:

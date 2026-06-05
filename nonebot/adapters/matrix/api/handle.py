@@ -652,8 +652,8 @@ class HandleMixin:
         bot: Bot,
         *,
         device_keys: dict[str, Any] | None = None,
-        one_time_keys: dict[str, str] | None = None,
-        fallback_keys: dict[str, str] | None = None,
+        one_time_keys: dict[str, Any] | None = None,
+        fallback_keys: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """上传设备身份密钥和/或一次性密钥。
 
