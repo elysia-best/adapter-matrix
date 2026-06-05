@@ -15,7 +15,7 @@ dependencies = [
     "base58>=2.1.1",
     "cryptography>=48.0.0",
     "nonebot2>=2.4.4",
-    "python-olm>=3.2.16",
+    "python3-olm>=3.2.19",
     "requests-oauth2client>=1.8.0",
 ]
 
@@ -45,9 +45,6 @@ documentation = "https://github.com/nonebot/adapter-matrix"
 [tool.uv.build-backend]
 module-name = "nonebot.adapters.matrix"
 module-root = ""
-
-[tool.uv.sources]
-python-olm = { git = "https://github.com/elysia-best/olm.git", subdirectory = "python", rev = "c366100bc79ac16e13d4fd7eb2b1d2064aa555f7" }
 
 [tool.ruff]
 line-length = 88
