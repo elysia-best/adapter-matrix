@@ -765,12 +765,13 @@ class Adapter(BaseAdapter, HandleMixin):
             except Exception as e:
                 log(
                     "ERROR",
-                    f"Matrix bot loop failed; retrying...  {type(e).__name__}: {e}",
+                    f"Matrix bot loop failed; retrying...  {type(e).__name__}",
                 )
-                await asyncio.sleep(self.matrix_config.matrix_retry_interval)
             finally:
                 if bot and bot.self_id in self.bots:
                     self.bot_disconnect(bot)
+                else:
+                    await asyncio.sleep(self.matrix_config.matrix_retry_interval)
 
     async def _bootstrap_bot(self, bot_info: BotInfo) -> WhoamiResponse:
         # The adapter runs with configured tokens; whoami validates the token and
