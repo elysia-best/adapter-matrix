@@ -179,6 +179,7 @@ class CryptoEngine:
         """处理 to-device 事件。
 
         主要处理以下类型:
+        - m.room.encrypted (Olm): 解密后递归处理内部事件
         - m.room_key: 导入 Megolm 入站会话密钥
         - m.forwarded_room_key: 转发来的 Megolm 会话密钥
         - m.room_key_request: 密钥请求 (可选地重新发送密钥)
@@ -188,7 +189,9 @@ class CryptoEngine:
         content = raw.content
         sender = str(raw.sender) if raw.sender else "unknown"
 
-        if event_type == "m.room_key":
+        if event_type == "m.room.encrypted":
+            await self._handle_olm_encrypted_to_device(raw, sender)
+        elif event_type == "m.room_key":
             await self._handle_room_key(content)
         elif event_type == "m.forwarded_room_key":
             await self._handle_forwarded_room_key(content)
@@ -252,6 +255,66 @@ class CryptoEngine:
                 "TRACE",
                 f"收到来自 {sender} 的密钥请求 (room={room_id})",
             )
+
+    async def _handle_olm_encrypted_to_device(
+        self, raw: RawMatrixEvent, sender: str
+    ) -> None:
+        """解密 Olm 加密的 to-device 事件并递归处理内部事件。
+
+        现代 Matrix 客户端通过 Olm 加密 to-device 消息来安全地共享
+        Megolm 会话密钥。加密后的 to-device 事件类型为 m.room.encrypted，
+        algorithm 为 m.olm.v1.curve25519-aes-sha2。
+        """
+        content = raw.content
+        algorithm = content.get("algorithm")
+        if algorithm != "m.olm.v1.curve25519-aes-sha2":
+            return
+
+        ciphertext_map = content.get("ciphertext")
+        if not isinstance(ciphertext_map, dict):
+            log("WARNING", "Olm to-device 消息缺少有效的 ciphertext 字段")
+            return
+
+        my_curve25519 = self._account.account.identity_keys["curve25519"]
+        my_entry = ciphertext_map.get(my_curve25519)
+        if my_entry is None:
+            log(
+                "TRACE",
+                f"Olm to-device 消息不包含本设备的密钥 ({my_curve25519[:12]}...)，跳过",
+            )
+            return
+
+        if not isinstance(my_entry, dict):
+            return
+
+        body = my_entry.get("body")
+        msg_type = my_entry.get("type", 0)
+        if not isinstance(body, str):
+            return
+
+        sender_key = content.get("sender_key", "")
+        plaintext = self._sessions.decrypt_to_device_message(body, msg_type, sender_key)
+        if plaintext is None:
+            log("WARNING", f"Olm to-device 解密失败 (sender={sender})")
+            return
+
+        try:
+            inner = json.loads(plaintext)
+        except json.JSONDecodeError:
+            log("WARNING", f"Olm to-device 解密后 JSON 解析失败 (sender={sender})")
+            return
+
+        inner_type = inner.get("type")
+        inner_content = inner.get("content", {})
+        if not isinstance(inner_type, str) or not isinstance(inner_content, dict):
+            return
+
+        inner_raw = RawMatrixEvent(
+            type=inner_type,
+            content=inner_content,
+            sender=raw.sender,
+        )
+        await self.handle_to_device_event(inner_raw)
 
     # ------------------------------------------------------------------
     # 消息加密/解密

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
@@ -260,8 +261,8 @@ class KeyRecovery:
                 if line.strip() and not line.startswith("-----")
             )
 
-        # 去除可能的前缀（如空格、换行）
-        code = code.strip()
+        # 去除空白字符（Matrix recovery code 通常以空格分组显示）
+        code = re.sub(r"\s+", "", code)
 
         try:
             decoded = base58_lib.b58decode(code)
@@ -270,19 +271,39 @@ class KeyRecovery:
             msg = f"无效的 recovery code: {e}"
             raise ValueError(msg) from e
 
-        # Matrix recovery key 结构 (参见 Matrix Spec Appendices):
-        # 首字节: 0x8b (密钥类型标识)
-        # 后续: 实际密钥数据 (Curve25519 私钥 = 32 bytes)
-        if len(decoded) >= 33 and decoded[0] == 0x8B:
-            decoded = decoded[1:]  # 移除前缀字节
+        # Matrix recovery key 结构 (Matrix Spec Appendices):
+        #
+        #   字节数组 = 0x8B || 0x01 || raw_key(32 bytes) || parity(1 byte)
+        #
+        #   其中:
+        #   - 0x8B: 密钥类型标识 (Curve25519)
+        #   - 0x01: 版本号
+        #   - raw_key: Curve25519 私钥 (32 bytes)
+        #   - parity: 全部前序字节的 XOR 校验和
+        #
+        #   部分旧实现可能省略版本号或校验字节。
+        key = decoded
+        log("TRACE", f"recovery key 解码后共 {len(key)} 字节 (hex: {key.hex()})")
 
-        if len(decoded) != 32:
+        # 移除 0x8B 0x01 双字节头 (Matrix Spec 格式)
+        if len(key) >= 34 and key[0] == 0x8B and key[1] == 0x01:
+            key = key[2:]  # 移除双字节头
+            # 如果末尾还有校验字节 (总长 35 的情况)，移除末尾 1 字节
+            if len(key) > 32:
+                key = key[:32]
+        # 回退: 仅移除 0x8B 单字节头 (旧实现)
+        elif len(key) >= 33 and key[0] == 0x8B:
+            key = key[1:]  # 移除单字节头
+            if len(key) > 32:
+                key = key[:32]
+
+        if len(key) != 32:
             log(
                 "WARNING",
-                f"recovery key 解码后长度为 {len(decoded)} (期望 32)",
+                f"recovery key 解码后长度为 {len(key)} (期望 32)",
             )
-            # 仍尝试使用（某些实现可能不包含前缀）
-            if len(decoded) > 32:
-                decoded = decoded[:32]
+            # 仍尝试使用
+            if len(key) > 32:
+                key = key[:32]
 
-        return decoded
+        return key
