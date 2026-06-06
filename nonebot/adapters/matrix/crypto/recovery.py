@@ -99,13 +99,18 @@ class KeyRecovery:
 
         recovered = 0
         rooms = keys_response.get("rooms", {})
-        for room_id, sessions in rooms.items():
-            session_data = (
-                sessions if isinstance(sessions, dict) else sessions.get("sessions", {})
-            )
-            for session_id, data in session_data.items():
+        for room_id, room_data in rooms.items():
+            if not isinstance(room_data, dict):
+                continue
+            sessions = room_data.get("sessions", {})
+            if not isinstance(sessions, dict):
+                continue
+            for session_id, session_info in sessions.items():
+                if not isinstance(session_info, dict):
+                    continue
+                session_data = session_info.get("session_data", {})
                 try:
-                    session_key = self._decrypt_session_data(private_key_bytes, data)
+                    session_key = self._decrypt_session_data(private_key_bytes, session_data)
                     if session_key:
                         if self._megolm.add_inbound_session(
                             room_id, session_id, session_key
@@ -152,9 +157,9 @@ class KeyRecovery:
             return None
 
         try:
-            ciphertext = base64.b64decode(ciphertext_b64)
-            ephemeral = base64.b64decode(ephemeral_b64)
-            expected_mac = base64.b64decode(mac_b64)
+            ciphertext = self._b64decode(ciphertext_b64)
+            ephemeral = self._b64decode(ephemeral_b64)
+            expected_mac = self._b64decode(mac_b64)
         except Exception as e:
             log("WARNING", f"session_data base64 解码失败: {e}")
             return None
@@ -186,10 +191,10 @@ class KeyRecovery:
         mac_key = key_material[32:64]
         aes_iv = key_material[64:80]
 
-        # 验证 MAC: HMAC-SHA256(empty_string, mac_key)[:8] == mac
+        # 验证 MAC: HMAC-SHA256(ciphertext, mac_key)[:8] == mac
         import hmac as hmac_mod
 
-        computed_hmac = hmac_mod.HMAC(mac_key, b"", "sha256")
+        computed_hmac = hmac_mod.HMAC(mac_key, ciphertext, "sha256")
         actual_mac = computed_hmac.digest()[:8]  # 取前 8 字节
 
         # 安全的 MAC 比较 (预防时序攻击)
@@ -234,6 +239,21 @@ class KeyRecovery:
         if data[-padding_length:] != bytes([padding_length] * padding_length):
             return None
         return data[:-padding_length]
+
+    @staticmethod
+    def _b64decode(s: str) -> bytes:
+        """Decode base64 string, with or without padding.
+
+        Python's b64decode requires '=' padding, but many Matrix
+        implementations (e.g. Element, matrix-js-sdk) store base64
+        data without trailing padding characters.
+        """
+        s = s.strip().replace("-", "+").replace("_", "/")
+        # Add missing padding
+        remainder = len(s) % 4
+        if remainder:
+            s += "=" * (4 - remainder)
+        return base64.b64decode(s)
 
     # ------------------------------------------------------------------
     # Recovery Code 解码
