@@ -5,6 +5,7 @@ from typing_extensions import override
 
 from nonebot.adapters import Event as BaseEvent
 
+from nonebot.utils import escape_tag
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from .api.model import RawMatrixEvent
@@ -86,9 +87,10 @@ class MessageEvent(Event):
 
     @override
     def get_event_description(self) -> str:
+        message = escape_tag(str(self.get_message()))
         return (
             f"Message {self.event_id or ''} from {self.sender or ''} "
-            f"in {self.room_id or ''}: {self.get_message()}"
+            f"in {self.room_id or ''}: {message}"
         )
 
 

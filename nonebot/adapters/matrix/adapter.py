@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import sys
 from time import time
+import traceback
 from typing import Any
 from typing_extensions import override
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -765,7 +766,8 @@ class Adapter(BaseAdapter, HandleMixin):
             except Exception as e:
                 log(
                     "ERROR",
-                    f"Matrix bot loop failed; retrying...  {type(e).__name__} \n {e}",
+                    f"Matrix bot loop failed; retrying...  {type(e).__name__}: {e}\n"
+                    f"{traceback.format_exc()}",
                 )
                 await asyncio.sleep(self.matrix_config.matrix_retry_interval)
             finally:
@@ -811,8 +813,8 @@ class Adapter(BaseAdapter, HandleMixin):
                     filter=bot.bot_info.sync_filter,
                     set_presence=bot.bot_info.set_presence,
                 )
-                bot.next_batch = sync.next_batch
                 await self._handle_sync(bot, sync)
+                bot.next_batch = sync.next_batch
             except RateLimitException as e:  # noqa: PERF203
                 delay = (e.retry_after_ms or 0) / 1000
                 await asyncio.sleep(delay or self.matrix_config.matrix_retry_interval)
@@ -829,7 +831,8 @@ class Adapter(BaseAdapter, HandleMixin):
             except Exception as e:
                 log(
                     "ERROR",
-                    f"Error while syncing Matrix bot {bot.self_id}: {type(e).__name__}: {e}",
+                    f"Error while syncing Matrix bot {bot.self_id}: "
+                    f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
                 )
                 await asyncio.sleep(self.matrix_config.matrix_retry_interval)
 
@@ -837,11 +840,14 @@ class Adapter(BaseAdapter, HandleMixin):
         await self._handle_e2ee_sync_data(bot, sync)
         self._update_direct_rooms(bot, sync.account_data.events)
         for room_id, room in sync.rooms.join.items():
+            log("TRACE", f"Processing joined room {room_id} in sync")
             self._update_direct_rooms(bot, room.account_data.events)
             await self._handle_joined_room(bot, room_id, room)
         for room_id, room in sync.rooms.invite.items():
+            log("TRACE", f"Processing invited room {room_id} in sync")
             await self._handle_invited_room(bot, room_id, room)
         for room_id, room in sync.rooms.leave.items():
+            log("TRACE", f"Processing left room {room_id} in sync")
             await self._handle_left_room(bot, room_id, room)
 
     async def _handle_e2ee_sync_data(self, bot: Bot, sync: SyncResponse) -> None:
@@ -960,6 +966,8 @@ class Adapter(BaseAdapter, HandleMixin):
     ) -> None:
         if self._is_old_event(bot, raw):
             return
+
+        log("TRACE", f"Dispatching event {raw.event_id or raw.type} in room {room_id}")
 
         # 解密 m.room.encrypted 事件
         if raw.type == "m.room.encrypted" and bot.crypto is not None:

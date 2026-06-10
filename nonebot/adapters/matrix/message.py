@@ -11,10 +11,11 @@ from nonebot.adapters import (
 )
 
 from nonebot.compat import type_validate_python
+from nonebot.utils import escape_tag
 
 from .api.model import UploadResponse
 from .api.types import EventId, MxcUri, UserId
-from .utils import escape, unescape
+from .utils import escape, log, unescape
 
 MATRIX_HTML_FORMAT = "org.matrix.custom.html"
 MEDIA_SEGMENT_TYPES = {"image", "file", "audio", "video"}
@@ -432,6 +433,11 @@ def message_from_content(content: dict[str, Any]) -> Message:
             return Message(MessageSegment.html(body, content["formatted_body"]))
         segment_type = MSGTYPE_SEGMENT_MAP.get(msgtype, "text")
         factory = getattr(MessageSegment, segment_type)
+        log(
+            "TRACE",
+            f"Getting message from content with msgtype {msgtype}, "
+            f"body: {escape_tag(str(body))}",
+        )
         return Message(factory(body))
     if msgtype in {"m.image", "m.file", "m.audio", "m.video"}:
         segment_type = MSGTYPE_SEGMENT_MAP[msgtype]
