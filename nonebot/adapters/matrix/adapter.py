@@ -765,7 +765,7 @@ class Adapter(BaseAdapter, HandleMixin):
             except Exception as e:
                 log(
                     "ERROR",
-                    f"Matrix bot loop failed; retrying...  {type(e).__name__}",
+                    f"Matrix bot loop failed; retrying...  {type(e).__name__} \n {e}",
                 )
                 await asyncio.sleep(self.matrix_config.matrix_retry_interval)
             finally:
