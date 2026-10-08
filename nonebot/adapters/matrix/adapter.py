@@ -16,6 +16,7 @@ from typing_extensions import override
 from urllib.parse import parse_qs, urlencode, urlparse
 import webbrowser
 
+from nonebot import get_driver
 from nonebot.adapters import Adapter as BaseAdapter, Bot as BaseBot
 
 from nonebot.drivers import URL, Driver, ForwardDriver, Request
@@ -852,6 +853,22 @@ class Adapter(BaseAdapter, HandleMixin):
 
     async def _handle_e2ee_sync_data(self, bot: Bot, sync: SyncResponse) -> None:
         """Process device_lists and to_device events for E2EE."""
+        if bot.crypto is not None:
+            bot.crypto.receive_sync_changes(
+                changed=[
+                    str(u)
+                    for u in (sync.device_lists.changed if sync.device_lists else [])
+                ],
+                left=[
+                    str(u)
+                    for u in (sync.device_lists.left if sync.device_lists else [])
+                ],
+                to_device_events=sync.to_device.events
+                if sync.to_device is not None
+                else [],
+                next_batch=sync.next_batch,
+                one_time_key_counts=sync.device_one_time_keys_count,
+            )
         if sync.device_lists is not None and bot.crypto is not None:
             await bot.crypto.handle_device_lists(
                 changed=[str(u) for u in sync.device_lists.changed],
@@ -967,6 +984,13 @@ class Adapter(BaseAdapter, HandleMixin):
         if self._is_old_event(bot, raw):
             return
 
+        if (
+            raw.type.startswith("m.key.verification.")
+            and bot.crypto is not None
+            and await bot.crypto.handle_verification_event(raw)
+        ):
+            return
+
         log("TRACE", f"Dispatching event {raw.event_id or raw.type} in room {room_id}")
 
         # 解密 m.room.encrypted 事件
@@ -991,6 +1015,8 @@ class Adapter(BaseAdapter, HandleMixin):
         ):
             return
         to_me = self._is_to_me(bot, raw, room_id=room_id)
+        if to_me:
+            raw = self._strip_leading_mention(bot, raw)
         event = event_from_raw(raw, room_id=room_id, to_me=to_me)
         await bot.handle_event(event)
 
@@ -1004,13 +1030,50 @@ class Adapter(BaseAdapter, HandleMixin):
     def _is_to_me(self, bot: Bot, raw: RawMatrixEvent, *, room_id: str) -> bool:
         if room_id in bot.direct_rooms:
             return True
+
         mentions = raw.content.get("m.mentions")
         if isinstance(mentions, dict):
             user_ids = mentions.get("user_ids")
             if isinstance(user_ids, list) and bot.self_id in user_ids:
                 return True
+
         body = raw.content.get("body")
-        return isinstance(body, str) and bot.self_id in body
+        if not isinstance(body, str):
+            return False
+
+        body = body.lstrip()
+        if self.matrix_config.matrix_command_to_me:
+            command_start = get_driver().config.command_start
+            if any(body.startswith(start) for start in command_start):
+                return True
+
+        return bot.self_id in body
+
+    def _strip_leading_mention(self, bot: Bot, raw: RawMatrixEvent) -> RawMatrixEvent:
+        """Remove a leading Matrix mention before NoneBot parses commands."""
+        mentions = raw.content.get("m.mentions")
+        if not isinstance(mentions, dict):
+            return raw
+        user_ids = mentions.get("user_ids")
+        if not isinstance(user_ids, list) or bot.self_id not in user_ids:
+            return raw
+
+        body = raw.content.get("body")
+        if not isinstance(body, str):
+            return raw
+        body = body.lstrip()
+        command_start = get_driver().config.command_start
+        command_index = [body.find(start) for start in command_start]
+        command_index = [index for index in command_index if index > 0]
+        if not command_index:
+            return raw
+        index = min(command_index)
+        if not body[:index].rstrip().endswith((":", "：")):
+            return raw
+
+        content = dict(raw.content)
+        content["body"] = body[index:]
+        return raw.model_copy(update={"content": content})
 
     @override
     async def _call_api(self, bot: BaseBot, api: str, **data: Any) -> Any:

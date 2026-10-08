@@ -19,10 +19,12 @@ from typing import TYPE_CHECKING, Any
 
 from .account import OlmAccountManager
 from .device_keys import DeviceKeyStore
+from .machine import CryptoMachine, SyncChanges
 from .megolm import MegolmManager
 from .recovery import KeyRecovery
 from .sessions import OlmSessionManager
 from .store import CryptoStore
+from .verification import VerificationManager
 from ..api.model import RawMatrixEvent
 from ..utils import log
 
@@ -71,6 +73,8 @@ class CryptoEngine:
         self._device_keys = DeviceKeyStore(self._store)
         self._megolm = MegolmManager(self._store, self._sessions, self._device_keys)
         self._recovery = KeyRecovery(self._store, self._megolm)
+        self.machine = CryptoMachine(self._store, self._megolm)
+        self._verification = VerificationManager(adapter, bot)
 
         # 房间加密状态缓存
         self._room_encrypted: dict[str, dict] = {}
@@ -124,13 +128,25 @@ class CryptoEngine:
             log("WARNING", f"上传 fallback 密钥失败: {type(e).__name__}: {e}")
 
         # 7: 从恢复码恢复 Megolm 会话
-        recovery_code = self._bot.bot_info.recovery_code
-        if recovery_code:
+        recovery_code = (
+            self._bot.bot_info.recovery_key or self._bot.bot_info.recovery_code
+        )
+        passphrase = self._bot.bot_info.secret_storage_passphrase
+        if recovery_code or passphrase:
             try:
-                count = await self._recovery.recover_from_backup(
-                    self._adapter, self._bot, recovery_code
-                )
+                if recovery_code:
+                    count = await self._recovery.recover_from_backup(
+                        self._adapter, self._bot, recovery_code
+                    )
+                else:
+                    count = await self._recovery.recover_from_secret_storage(
+                        self._adapter, self._bot, passphrase or ""
+                    )
                 log("INFO", f"从密钥备份恢复了 {count} 个 Megolm 会话")
+            except ValueError:
+                # Credential and backup mismatches are actionable.  Do not
+                # turn an invalid key into a successful-looking empty restore.
+                raise
             except Exception as e:
                 log(
                     "WARNING",
@@ -180,6 +196,27 @@ class CryptoEngine:
         if left:
             self._device_keys.mark_left(left)
 
+    def receive_sync_changes(
+        self,
+        *,
+        changed: list[str],
+        left: list[str],
+        to_device_events: list[RawMatrixEvent],
+        next_batch: str | None = None,
+        one_time_key_counts: dict[str, int] | None = None,
+    ) -> None:
+        """Feed a sync response into the network-independent machine."""
+
+        self.machine.receive_sync_changes(
+            SyncChanges(
+                changed_users=changed,
+                left_users=left,
+                to_device_events=[event.model_dump() for event in to_device_events],
+                next_batch=next_batch,
+                one_time_key_counts=one_time_key_counts or {},
+            )
+        )
+
     # ------------------------------------------------------------------
     # To-Device 事件处理
     # ------------------------------------------------------------------
@@ -197,6 +234,10 @@ class CryptoEngine:
         event_type = raw.type
         content = raw.content
         sender = str(raw.sender) if raw.sender else "unknown"
+
+        if raw.type.startswith("m.key.verification."):
+            await self.handle_verification_event(raw)
+            return
 
         if event_type == "m.room.encrypted":
             await self._handle_olm_encrypted_to_device(raw, sender)
@@ -216,6 +257,22 @@ class CryptoEngine:
         elif event_type and event_type.startswith("m.key"):
             # 密钥验证消息 — 暂时忽略
             log("TRACE", f"密钥验证消息来自 {sender}: {event_type}")
+
+    async def handle_verification_event(self, raw: RawMatrixEvent) -> bool:
+        """Process a room verification event when automatic SAS is enabled."""
+        if not raw.type.startswith("m.key.verification."):
+            return False
+        handled = await self._verification.handle(raw)
+        if (
+            handled
+            and raw.type == "m.key.verification.mac"
+            and raw.sender is not None
+        ):
+            transaction_id = raw.content.get("transaction_id")
+            state = self._verification._transactions.get(transaction_id)  # type: ignore[attr-defined]
+            if state is not None:
+                self._device_keys.mark_verified(str(raw.sender), state.sender_device)
+        return handled
 
     async def _handle_room_key(self, content: dict[str, Any]) -> None:
         """处理 m.room_key: 导入 Megolm 入站会话密钥。
@@ -410,7 +467,40 @@ class CryptoEngine:
         algorithm = content.get("algorithm", "")
 
         if algorithm == "m.megolm.v1.aes-sha2":
-            return self._decrypt_megolm(raw, room_id, content)
+            decrypted = self._decrypt_megolm(raw, room_id, content)
+            if decrypted is not None:
+                return decrypted
+            session_id = content.get("session_id")
+            credential = (
+                self._bot.bot_info.recovery_key or self._bot.bot_info.recovery_code
+            )
+            if isinstance(session_id, str) and credential:
+                try:
+                    restored = await self._recovery.recover_session_from_backup(
+                        self._adapter, self._bot, credential, room_id, session_id
+                    )
+                except Exception as exc:
+                    log("WARNING", f"按需恢复房间密钥失败: {type(exc).__name__}: {exc}")
+                    restored = False
+                if restored:
+                    return self._decrypt_megolm(raw, room_id, content)
+            elif (
+                isinstance(session_id, str)
+                and self._bot.bot_info.secret_storage_passphrase
+            ):
+                try:
+                    await self._recovery.recover_from_secret_storage(
+                        self._adapter,
+                        self._bot,
+                        self._bot.bot_info.secret_storage_passphrase,
+                    )
+                except Exception as exc:
+                    log(
+                        "WARNING",
+                        f"按需解锁 Secret Storage 失败: {type(exc).__name__}: {exc}",
+                    )
+                return self._decrypt_megolm(raw, room_id, content)
+            return None
         if algorithm == "m.olm.v1.curve25519-aes-sha2":
             # Olm 加密的房间事件——通常是设备间的密钥传输，
             # 不包含用户消息，无需分派

@@ -15,7 +15,6 @@ dependencies = [
     "base58>=2.1.1",
     "cryptography>=48.0.0",
     "nonebot2>=2.4.4",
-    "python3-olm>=3.2.19",
     "requests-oauth2client>=1.8.0",
 ]
 
@@ -145,13 +144,20 @@ flake8-quotes = { inline-quotes = "double", multiline-quotes = "double" }
     "RUF003", # Chinese fullwidth punctuation in comments
     "ERA001",  # Chinese comments that look like commented-out code
     "SLF001",  # accessing adapter._api_* methods through object type
-    "ANN401",  # typing.Any for olm objects that have no type stubs
+    "ANN401",  # dynamic Matrix payloads and compatibility facades
     "PLR2004", # magic values from Matrix spec
     "PLR0911", # too many returns in recovery decrypt logic
     "PLC0415", # local imports for circular dependency avoidance
     "PERF203", # try-except in crypto init loops (acceptable perf impact)
     "SIM102",  # nested if in crypto load (clearer this way)
     "TRY300",  # try-else style preference
+    "TRY003",  # protocol errors carry actionable messages
+    "TRY004",  # malformed wire data is reported uniformly as ValueError
+    "EM101",   # protocol error messages are intentionally explicit
+    "EM102",   # protocol error messages are intentionally explicit
+    "C901",    # crypto state machines mirror protocol branches
+    "PLR0912", # crypto state machines mirror protocol branches
+    "PLR0913", # protocol state records have explicit fields
 ]
 "nonebot/adapters/matrix/event.py" = [
     "RUF002", # Chinese fullwidth punctuation in docstrings

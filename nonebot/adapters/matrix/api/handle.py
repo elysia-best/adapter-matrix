@@ -11,8 +11,10 @@ from nonebot.utils import escape_tag
 from yarl import URL
 
 from .model import (
+    CreateRoomResponse,
     EventIdResponse,
     JoinRoomResponse,
+    LeaveRoomResponse,
     LoginFlowsResponse,
     LoginIdentifier,
     LoginResponse,
@@ -20,15 +22,17 @@ from .model import (
     MembersChunkResponse,
     MessagesResponse,
     PasswordLoginRequest,
+    RawMatrixEvent,
     RefreshTokenRequest,
     RefreshTokenResponse,
     RelationsResponse,
+    RoomStateResponse,
     SyncResponse,
     UploadResponse,
     WhoamiResponse,
 )
 from .types import EventId, EventType, ReceiptType, RoomIdentifier, TxnId, UserId
-from .utils import filter_unset_query
+from .utils import filter_query, filter_unset_query
 from ..config import BotInfo, Config
 from ..exception import (
     ActionFailed,
@@ -389,7 +393,7 @@ class HandleMixin:
                 "GET",
                 self.media_url(bot.bot_info, path),
                 headers=_headers(self, bot.bot_info),
-                params=filter_unset_query({"allow_remote": allow_remote}),
+                params=filter_query({"allow_remote": allow_remote}),
             ),
             parse_json=False,
         )
@@ -416,7 +420,7 @@ class HandleMixin:
                     f"/thumbnail/{quote_path(server_name)}/{quote_path(media_id)}",
                 ),
                 headers=_headers(self, bot.bot_info),
-                params=filter_unset_query(
+                params=filter_query(
                     {
                         "width": width,
                         "height": height,
@@ -636,12 +640,128 @@ class HandleMixin:
             bot.bot_info,
             _json_request(
                 method="POST",
-                url=self.client_url(bot.bot_info, f"/rooms/{quote_path(room_id)}/join"),
+                url=self.client_url(bot.bot_info, f"/join/{quote_path(room_id)}"),
                 headers=_headers(self, bot.bot_info),
                 body=filter_unset_query({"reason": reason}),
             ),
         )
         return type_validate_python(JoinRoomResponse, data)
+
+    async def _api_leave_room(
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        room_id: RoomIdentifier,
+        reason: str | None = None,
+    ) -> LeaveRoomResponse:
+        """Leave a room."""
+        data = await _request(
+            self,
+            bot.bot_info,
+            _json_request(
+                method="POST",
+                url=self.client_url(
+                    bot.bot_info, f"/rooms/{quote_path(room_id)}/leave"
+                ),
+                headers=_headers(self, bot.bot_info),
+                body=filter_unset_query({"reason": reason}),
+            ),
+        )
+        return type_validate_python(LeaveRoomResponse, data)
+
+    async def _api_get_room_state(
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        room_id: RoomIdentifier,
+        event_type: EventType | None = None,
+        state_key: str | None = None,
+    ) -> RoomStateResponse | RawMatrixEvent:
+        """Read all room state or a single state event."""
+        path = f"/rooms/{quote_path(room_id)}/state"
+        if event_type is not None:
+            path = f"{path}/{quote_path(event_type)}"
+            if state_key is not None:
+                path = f"{path}/{quote_path(state_key)}"
+        data = await _request(
+            self,
+            bot.bot_info,
+            Request(
+                "GET",
+                self.client_url(bot.bot_info, path),
+                headers=_headers(self, bot.bot_info),
+            ),
+        )
+        if event_type is None:
+            return type_validate_python(RoomStateResponse, {"events": data})
+        return type_validate_python(RawMatrixEvent, data)
+
+    async def _api_send_state_event(  # noqa: PLR0913
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        room_id: RoomIdentifier,
+        event_type: EventType,
+        content: dict[str, Any],
+        state_key: str = "",
+        txn_id: TxnId | None = None,
+    ) -> EventIdResponse:
+        """Send a state event with an optional state key."""
+        path = f"/rooms/{quote_path(room_id)}/state/{quote_path(event_type)}"
+        if state_key:
+            path = f"{path}/{quote_path(state_key)}"
+        method = "PUT"
+        # State events are idempotent by their (room, event type, state key)
+        # tuple.  The Client-Server API has no transaction-id variant for this
+        # endpoint; retain the optional argument for source compatibility.
+        del txn_id
+        data = await _request(
+            self,
+            bot.bot_info,
+            _json_request(
+                method=method,
+                url=self.client_url(bot.bot_info, path),
+                headers=_headers(self, bot.bot_info),
+                body=content,
+            ),
+        )
+        return type_validate_python(EventIdResponse, data)
+
+    async def _api_create_room(  # noqa: PLR0913
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        preset: str | None = None,
+        name: str | None = None,
+        invite: list[UserId] | None = None,
+        initial_state: list[dict[str, Any]] | None = None,
+        creation_content: dict[str, Any] | None = None,
+        room_alias_name: str | None = None,
+        is_direct: bool | None = None,
+    ) -> CreateRoomResponse:
+        """Create a room using the Client-Server v3 endpoint."""
+        body = filter_unset_query(
+            {
+                "preset": preset,
+                "name": name,
+                "invite": invite,
+                "initial_state": initial_state,
+                "creation_content": creation_content,
+                "room_alias_name": room_alias_name,
+                "is_direct": is_direct,
+            }
+        )
+        data = await _request(
+            self,
+            bot.bot_info,
+            _json_request(
+                method="POST",
+                url=self.client_url(bot.bot_info, "/createRoom"),
+                headers=_headers(self, bot.bot_info),
+                body=body,
+            ),
+        )
+        return type_validate_python(CreateRoomResponse, data)
 
     # ------------------------------------------------------------------
     # E2EE 端点: 设备密钥管理
@@ -789,6 +909,28 @@ class HandleMixin:
                 headers=_headers(self, bot.bot_info),
             ),
         )
+
+    async def _api_get_account_data(
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        event_type: str,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Read account data used by Matrix Secret Storage."""
+        owner = quote_path(user_id or str(bot.user_id))
+        data = await _request(
+            self,
+            bot.bot_info,
+            Request(
+                "GET",
+                self.client_url(
+                    bot.bot_info, f"/user/{owner}/account_data/{quote_path(event_type)}"
+                ),
+                headers=_headers(self, bot.bot_info),
+            ),
+        )
+        return data if isinstance(data, dict) else {}
 
     async def _api_room_keys_keys(
         self: AdapterProtocol,

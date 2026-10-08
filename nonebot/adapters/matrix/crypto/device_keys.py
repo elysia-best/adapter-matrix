@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from .primitives import verify_device_signature
 from .store import CryptoStore
+from ..serialization import encode_matrix_canonical_json
 from ..utils import log
 
 if TYPE_CHECKING:
@@ -72,6 +74,15 @@ class DeviceKeyStore:
         keys = device.get("keys", {})
         return keys.get(f"ed25519:{device_id}")
 
+    def mark_verified(self, user_id: str, device_id: str) -> bool:
+        """Persist SAS verification for a known device."""
+        device = self.get_device_key(user_id, device_id)
+        if device is None:
+            return False
+        device["verified"] = True
+        self._save()
+        return True
+
     async def query_keys(self, adapter: Adapter, bot: Bot) -> None:
         """批量查询待查询用户的设备密钥。
 
@@ -96,7 +107,18 @@ class DeviceKeyStore:
                     # 设备已删除
                     self._keys[user_id].pop(device_id, None)
                 else:
-                    self._keys[user_id][device_id] = key_data
+                    stored_key_data: dict[str, Any] | Any = key_data
+                    if isinstance(key_data, dict):
+                        unsigned = encode_matrix_canonical_json(key_data).encode(
+                            "utf-8"
+                        )
+                        stored_key_data = dict(key_data)
+                        stored_key_data["verified"] = verify_device_signature(
+                            user_id=user_id,
+                            device_keys=key_data,
+                            canonical_payload=unsigned,
+                        )
+                    self._keys[user_id][device_id] = stored_key_data
 
         self._save()
         log(

@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class BotInfo(BaseModel):
@@ -37,9 +37,12 @@ class BotInfo(BaseModel):
     auto_accept_blacklist: list[str] = Field(default_factory=list)
 
     # E2EE configuration
+    recovery_key: str | None = None
+    # Matrix recovery key. ``recovery_code`` remains a deprecated alias.
+    # Deprecated compatibility alias; prefer ``recovery_key``.
     recovery_code: str | None = None
-    # MATRIX_RECOVERY_CODE: base58-encoded Curve25519 private key
-    # Used to restore Megolm sessions from server-side key backup
+    secret_storage_passphrase: str | None = None
+    # Passphrase used to unlock m.secret_storage.v1 account data.
     e2ee_store_path: str | None = None
     # E2EE state persistence directory, derived from matrix_token_store_path when None
 
@@ -47,12 +50,27 @@ class BotInfo(BaseModel):
     session_type: str | None = None  # "legacy_login" | "oauth2" | None
     oauth_token_endpoint: str | None = None  # persisted for OAuth2 refresh
 
+    @model_validator(mode="after")
+    def validate_recovery_credentials(self) -> "BotInfo":
+        if (
+            self.recovery_key
+            and self.recovery_code
+            and self.recovery_key != self.recovery_code
+        ):
+            msg = "recovery_key and deprecated recovery_code must match"
+            raise ValueError(msg)
+        if self.recovery_key is None and self.recovery_code:
+            self.recovery_key = self.recovery_code
+        return self
+
 
 class Config(BaseModel):
     matrix_bots: list[BotInfo] = Field(default_factory=list)
     matrix_api_timeout: float = 30.0
     matrix_sync_timeout: int = 30000
     matrix_retry_interval: float = 3.0
+    matrix_command_to_me: bool = False
+    matrix_auto_accept_verification: bool = False
     matrix_handle_self_message: bool = False
     matrix_handle_old_events: bool = False
     matrix_proxy: str | None = None

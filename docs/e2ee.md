@@ -1,12 +1,12 @@
 # 端到端加密（E2EE）
 
-适配器支持 Matrix 端到端加密房间，使用 [Olm](https://gitlab.matrix.org/matrix-org/olm) 和 [Megolm](https://matrix.org/docs/guides/end-to-end-encryption-implementation-guide) 协议对消息进行加解密。
+适配器支持 Matrix 端到端加密房间，使用纯 Python 加密状态机处理设备密钥、to-device 消息和房间会话。
 
 ## 前置条件
 
-E2EE 依赖 `python3-olm`（libolm 的 Python 绑定），该依赖会随 `nonebot-adapter-matrix` 自动安装。
+E2EE 依赖 `cryptography`，不需要安装 libolm 或其他平台相关的 Olm 扩展。
 
-> **Windows 用户**：`python3-olm` 在 Windows 上的预编译 wheel 可能不可用，需要本地编译 libolm。如果安装失败，可以考虑在 WSL 或 Linux 容器中运行。
+当前后端提供架构无关的纯 Python 状态机和认证加密记录，适合在适配器内持久化和测试；它不读取旧 libolm pickle。与 Element 或 matrix-rust-sdk 的完整标准 Olm/Megolm ratchet 互操作仍需要专门的协议向量验证，不能仅凭同名的 Matrix 算法字段推断兼容。
 
 ## 启用 E2EE
 
@@ -20,7 +20,8 @@ MATRIX_BOTS='[
     "user_id": "@bot:example.org",
     "device_id": "BOTDEVICE",
     "e2ee_store_path": ".data/e2ee",
-    "recovery_code": "EsTb ..."
+    "recovery_key": "EsTb ...",
+    "secret_storage_passphrase": "OPTIONAL_PASSPHRASE"
   }
 ]'
 ```
@@ -30,7 +31,8 @@ MATRIX_BOTS='[
 ## 配置字段
 
 - `e2ee_store_path` — E2EE 密钥和会话持久化目录。包含 Olm 账户密钥、Megolm 会话、设备密钥缓存等。
-- `recovery_code` — **MATRIX_RECOVERY_CODE**，从服务端密钥备份恢复 Megolm 会话密钥。格式为 base58 编码的 Curve25519 私钥（52 字符），可在 Element 等客户端的「安全与隐私」设置中找到。
+- `recovery_key` — Matrix recovery key，从服务端密钥备份恢复 Megolm 会话密钥。
+- `secret_storage_passphrase` — 读取现有 Secret Storage 及备份密钥。
 
 ## 工作原理
 
@@ -86,7 +88,7 @@ Bot 启动时，加密引擎执行以下步骤：
 
 ## 密钥恢复
 
-当配置了 `recovery_code`（MATRIX_RECOVERY_CODE）时：
+当配置了 `recovery_key`（`recovery_code` 为兼容别名）或 `secret_storage_passphrase` 时：
 
 1. 启动时加密引擎调用 `/room_keys/version` 获取最新备份版本。
 2. 遍历该版本下的所有 `room_id → session_id → session_data`。
@@ -98,6 +100,6 @@ Bot 启动时，加密引擎执行以下步骤：
 ## 注意事项
 
 - **持久化**：E2EE 状态（Olm 账户、Megolm 会话、设备密钥缓存）会持久化到 `e2ee_store_path`。如果未设置且未提供 `MATRIX_TOKEN_STORE_PATH`，加密引擎完全不会初始化。
-- **libolm 兼容性**：Olm session 的 `from_pickle` 方法在某些平台/Python 版本上不可用，此时 Olm 会话不会跨重启持久化（不影响功能，仅影响重启后首次密钥共享的效率）。
-- **密钥验证**：适配器当前不处理 SAS/emoji 密钥验证。其他用户的设备标记为「未验证」不影响消息收发。
+- **存储格式**：加密状态以版本化 JSON 保存。旧的 `python3-olm` pickle 不会被加载，升级后会创建新的设备密钥状态。
+- **密钥验证**：默认关闭自动 SAS。设置全局 `MATRIX_AUTO_ACCEPT_VERIFICATION=true` 后才会自动接受协议支持的 SAS 请求；无效流程不会被标记为成功。
 - **首次消息延迟**：进入新加密房间发送首条消息时，需要先向所有成员设备共享 Megolm 密钥，可能有一定延迟。

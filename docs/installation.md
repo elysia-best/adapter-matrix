@@ -133,7 +133,9 @@ MATRIX_BOTS='[
     "set_presence": "online",
     "auto_accept_invites": true,
     "auto_accept_whitelist": null,
-    "auto_accept_blacklist": []
+    "auto_accept_blacklist": [],
+    "recovery_key": "OPTIONAL_MATRIX_RECOVERY_KEY",
+    "secret_storage_passphrase": "OPTIONAL_SSSS_PASSPHRASE"
   }
 ]'
 ```
@@ -152,7 +154,9 @@ MATRIX_BOTS='[
 | `auto_accept_invites` | `bool` | 是否自动接受群聊邀请 |
 | `auto_accept_whitelist` | `list[str] \| None` | 白名单，`null` 表示允许所有人 |
 | `auto_accept_blacklist` | `list[str]` | 黑名单，优先级高于白名单 |
-| `recovery_code` | `str \| None` | MATRIX_RECOVERY_CODE，用于 E2EE 密钥恢复 |
+| `recovery_key` | `str \| None` | Matrix recovery key，用于读取现有 E2EE 密钥备份 |
+| `recovery_code` | `str \| None` | `recovery_key` 的兼容别名（已弃用） |
+| `secret_storage_passphrase` | `str \| None` | Secret Storage passphrase，用于读取现有备份 |
 | `e2ee_store_path` | `str \| None` | E2EE 状态持久化目录 |
 
 ## 全局配置
@@ -161,6 +165,8 @@ MATRIX_BOTS='[
 MATRIX_API_TIMEOUT=30.0
 MATRIX_SYNC_TIMEOUT=30000
 MATRIX_RETRY_INTERVAL=3.0
+MATRIX_COMMAND_TO_ME=false
+MATRIX_AUTO_ACCEPT_VERIFICATION=false
 MATRIX_HANDLE_SELF_MESSAGE=false
 MATRIX_HANDLE_OLD_EVENTS=false
 MATRIX_PROXY='http://127.0.0.1:7890'
@@ -172,6 +178,7 @@ MATRIX_TOKEN_STORE_PATH='.data/matrix-tokens.json'
 | `MATRIX_API_TIMEOUT` | `float` | `30.0` | 普通 API 请求超时（秒） |
 | `MATRIX_SYNC_TIMEOUT` | `int` | `30000` | `/sync` long-poll 超时（毫秒） |
 | `MATRIX_RETRY_INTERVAL` | `float` | `3.0` | 网络错误后重试间隔（秒） |
+| `MATRIX_COMMAND_TO_ME` | `bool` | `false` | 是否将以 NoneBot 命令前缀开头的消息视为发给机器人 |
 | `MATRIX_HANDLE_SELF_MESSAGE` | `bool` | `false` | 是否处理机器人自己的消息 |
 | `MATRIX_HANDLE_OLD_EVENTS` | `bool` | `false` | 是否处理启动前的旧事件 |
 | `MATRIX_PROXY` | `str \| None` | `None` | HTTP 代理地址 |

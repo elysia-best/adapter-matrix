@@ -84,6 +84,79 @@ def test_old_event_handling_is_disabled_by_default() -> None:
     assert Config().matrix_handle_old_events is False
 
 
+def test_to_me_does_not_infer_localpart_mention(
+    dummy_bot: DummyBot,
+) -> None:
+    raw = RawMatrixEvent(
+        type="m.room.message",
+        content={"msgtype": "m.text", "body": "bot: /echo 123"},
+    )
+
+    assert not dummy_bot.adapter._is_to_me(
+        dummy_bot, raw, room_id="!room:example.org"
+    )
+
+
+def test_to_me_detects_full_user_id_in_body(dummy_bot: DummyBot) -> None:
+    raw = RawMatrixEvent(
+        type="m.room.message",
+        content={
+            "msgtype": "m.text",
+            "body": "@bot:example.org: /echo 123",
+        },
+    )
+
+    assert dummy_bot.adapter._is_to_me(dummy_bot, raw, room_id="!room:example.org")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_strips_standard_mention_before_command_parsing(
+    dummy_bot: DummyBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handled_events: list[Event] = []
+
+    async def handle_event(event: Event) -> None:
+        handled_events.append(event)
+
+    monkeypatch.setattr(dummy_bot, "handle_event", handle_event)
+    await dummy_bot.adapter._dispatch_room_event(
+        dummy_bot,
+        RawMatrixEvent(
+            type="m.room.message",
+            sender="@alice:example.org",
+            content={
+                "msgtype": "m.text",
+                "body": "bot: /echo 123",
+                "m.mentions": {"user_ids": ["@bot:example.org"]},
+            },
+        ),
+        room_id="!room:example.org",
+    )
+
+    assert handled_events[0].is_tome()
+    assert handled_events[0].get_message().extract_plain_text() == "/echo 123"
+
+
+def test_to_me_detects_command_prefix_when_configured(dummy_bot: DummyBot) -> None:
+    dummy_bot.adapter.matrix_config.matrix_command_to_me = True
+    raw = RawMatrixEvent(
+        type="m.room.message",
+        content={"msgtype": "m.text", "body": "/echo 123"},
+    )
+
+    assert dummy_bot.adapter._is_to_me(dummy_bot, raw, room_id="!room:example.org")
+
+
+def test_command_prefix_to_me_is_disabled_by_default(dummy_bot: DummyBot) -> None:
+    raw = RawMatrixEvent(
+        type="m.room.message",
+        content={"msgtype": "m.text", "body": "/echo 123"},
+    )
+
+    assert not dummy_bot.adapter._is_to_me(dummy_bot, raw, room_id="!room:example.org")
+
+
 @pytest.mark.asyncio
 async def test_bootstrap_loads_persisted_tokens(tmp_path: Path) -> None:
     store_path = tmp_path / "tokens.json"

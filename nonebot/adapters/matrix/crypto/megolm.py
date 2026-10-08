@@ -1,18 +1,22 @@
-"""MegolmManager — 管理 Megolm 群组棘轮会话。
-
-Megolm 是 Matrix 用于群组加密的协议。每个房间维护一个出站会话
-（用于加密发出的消息）和多个入站会话（用于解密收到的消息）。
-
-会话密钥通过 Olm 加密的 to-device 消息在设备间共享。
-"""
+"""Pure Python room group sessions."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+import hmac
+import json
+import os
+from typing import TYPE_CHECKING, Any
 
-import olm
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
 
 from .device_keys import DeviceKeyStore
+from .primitives import aes_cbc_decrypt, aes_cbc_encrypt, b64d, b64e, megolm_keys
 from .sessions import OlmSessionManager
 from .store import CryptoStore
 from ..utils import log
@@ -22,12 +26,188 @@ if TYPE_CHECKING:
     from ..bot import Bot
 
 
-class MegolmManager:
-    """管理 Megolm 入站和出站会话。
+def _varint(value: int) -> bytes:
+    out = bytearray()
+    while value >= 0x80:
+        out.append((value & 0x7F) | 0x80)
+        value >>= 7
+    out.append(value)
+    return bytes(out)
 
-    出站会话: 每个房间一个活跃的 OutboundGroupSession，定期轮换
-    入站会话: 从其他设备通过 m.room_key 共享的 InboundGroupSession
-    """
+
+def _read_varint(data: bytes, offset: int) -> tuple[int, int]:
+    value = 0
+    shift = 0
+    while offset < len(data):
+        byte = data[offset]
+        offset += 1
+        value |= (byte & 0x7F) << shift
+        if byte < 0x80:
+            return value, offset
+        shift += 7
+    raise ValueError
+
+
+@dataclass(slots=True)
+class GroupSession:
+    session_id: str
+    session_key: str
+    message_index: int = 0
+    ratchet: bytes = b""
+    ed25519_private: bytes = b""
+    first_known_index: int = 0
+
+    def __post_init__(self) -> None:
+        if self.ratchet or not self.session_key:
+            return
+        decoded = b64d(self.session_key)
+        if len(decoded) in (165, 229) and decoded[0] in (1, 2):
+            self.first_known_index = int.from_bytes(decoded[1:5], "big")
+            self.message_index = max(self.message_index, self.first_known_index)
+            self.ratchet = decoded[5:133]
+            if not self.session_id:
+                self.session_id = b64e(decoded[133:165])
+
+    @property
+    def id(self) -> str:
+        return self.session_id
+
+    @classmethod
+    def create(cls) -> GroupSession:
+        private = Ed25519PrivateKey.generate()
+        private_bytes = private.private_bytes(
+            serialization.Encoding.Raw,
+            serialization.PrivateFormat.Raw,
+            serialization.NoEncryption(),
+        )
+        public = private.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw
+        )
+        ratchet = os.urandom(128)
+        session = cls(b64e(public), "", 0, ratchet, private_bytes, 0)
+        session.session_key = session.sharing_key()
+        return session
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> GroupSession:
+        session_key = str(value["session_key"])
+        try:
+            decoded = b64d(session_key)
+            if decoded[:1] in (b"\x01", b"\x02") and len(decoded) >= 165:
+                index = int.from_bytes(decoded[1:5], "big")
+                ratchet = decoded[5:133]
+                session_id = b64e(decoded[133:165])
+            else:
+                index, ratchet, session_id = 0, b"", str(value["session_id"])
+        except (ValueError, TypeError):
+            index, ratchet, session_id = 0, b"", str(value["session_id"])
+        return cls(
+            session_id,
+            session_key,
+            int(value.get("message_index", index)),
+            ratchet,
+            b64d(str(value.get("ed25519_private", "")))
+            if value.get("ed25519_private")
+            else b"",
+            index,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "session_key": self.session_key,
+            "message_index": self.message_index,
+            "ed25519_private": b64e(self.ed25519_private)
+            if self.ed25519_private
+            else "",
+            "first_known_index": self.first_known_index,
+        }
+
+    def export_key(self) -> str:
+        return b64e(
+            b"\x01"
+            + self.message_index.to_bytes(4, "big")
+            + self.ratchet
+            + b64d(self.session_id)
+        )
+
+    def sharing_key(self) -> str:
+        body = (
+            b"\x02"
+            + self.message_index.to_bytes(4, "big")
+            + self.ratchet
+            + b64d(self.session_id)
+        )
+        signature = Ed25519PrivateKey.from_private_bytes(self.ed25519_private).sign(
+            body
+        )
+        return b64e(body + signature)
+
+    def _ratchet_at(self, index: int) -> bytes:
+        if index < self.first_known_index:
+            raise ValueError
+        value = self.ratchet
+        current = self.first_known_index
+        while current < index:
+            old = [value[i * 32 : (i + 1) * 32] for i in range(4)]
+            if (current + 1) % (1 << 24) == 0:
+                old[1] = hmac.new(old[0], b"\x01", "sha256").digest()
+                old[2] = hmac.new(old[0], b"\x02", "sha256").digest()
+                old[3] = hmac.new(old[0], b"\x03", "sha256").digest()
+            elif (current + 1) % (1 << 16) == 0:
+                old[2] = hmac.new(old[1], b"\x02", "sha256").digest()
+                old[3] = hmac.new(old[1], b"\x03", "sha256").digest()
+            elif (current + 1) % (1 << 8) == 0:
+                old[3] = hmac.new(old[2], b"\x03", "sha256").digest()
+            else:
+                old[3] = hmac.new(old[3], b"\x03", "sha256").digest()
+            value = b"".join(old)
+            current += 1
+        return value
+
+    def encrypt(self, plaintext: str) -> str:
+        index = self.message_index
+        ratchet = self._ratchet_at(index)
+        aes_key, mac_key, iv = megolm_keys(ratchet)
+        ciphertext = aes_cbc_encrypt(aes_key, iv, plaintext.encode())
+        payload = (
+            b"\x08" + _varint(index) + b"\x12" + _varint(len(ciphertext)) + ciphertext
+        )
+        authenticated = b"\x03" + payload
+        mac = hmac.new(mac_key, authenticated, "sha256").digest()[:8]
+        signature = Ed25519PrivateKey.from_private_bytes(self.ed25519_private).sign(
+            authenticated + mac
+        )
+        self.message_index += 1
+        return b64e(authenticated + mac + signature)
+
+    def decrypt(self, ciphertext: str) -> tuple[str, int]:
+        encoded = b64d(ciphertext)
+        if len(encoded) < 73 or encoded[0] != 3:
+            raise ValueError
+        payload, mac, signature = encoded[:-72], encoded[-72:-64], encoded[-64:]
+        tag, offset = _read_varint(payload, 1)
+        if tag != 0x08:
+            raise ValueError
+        index, offset = _read_varint(payload, offset)
+        if payload[offset] != 0x12:
+            raise ValueError
+        length, offset = _read_varint(payload, offset + 1)
+        encrypted = payload[offset : offset + length]
+        ratchet = self._ratchet_at(index)
+        aes_key, mac_key, iv = megolm_keys(ratchet)
+        if not hmac.compare_digest(
+            mac, hmac.new(mac_key, payload, "sha256").digest()[:8]
+        ):
+            raise ValueError
+        Ed25519PublicKey.from_public_bytes(b64d(self.session_id)).verify(
+            signature, payload + mac
+        )
+        return aes_cbc_decrypt(aes_key, iv, encrypted).decode("utf-8"), index
+
+
+class MegolmManager:
+    """Manage room sessions and encrypted room event payloads."""
 
     def __init__(
         self,
@@ -38,309 +218,194 @@ class MegolmManager:
         self._store = store
         self._session_mgr = session_mgr
         self._device_keys = device_keys
-        self._inbound: dict[str, dict[str, olm.InboundGroupSession]] = {}
-        self._outbound: dict[str, olm.OutboundGroupSession] = {}
-
-    # ------------------------------------------------------------------
-    # 生命周期
-    # ------------------------------------------------------------------
+        self._inbound: dict[str, dict[str, GroupSession]] = {}
+        self._outbound: dict[str, GroupSession] = {}
 
     def load(self) -> None:
-        """从存储的 session_key 重建所有入站和出站会话。"""
-        stored_in = self._store.load_inbound_sessions()
-        for room_id, sessions in stored_in.items():
-            self._inbound.setdefault(room_id, {})
+        self._inbound = {}
+        for room_id, sessions in self._store.load_inbound_sessions().items():
+            self._inbound[room_id] = {}
             for session_id, session_key in sessions.items():
-                self._try_import_session(room_id, session_id, session_key)
-        log("TRACE", f"已加载 {self._count_inbound()} 个入站 Megolm 会话")
+                if isinstance(session_key, str):
+                    try:
+                        decoded = b64d(session_key)
+                        if decoded[:1] in (b"\x01", b"\x02") and len(decoded) in (
+                            165,
+                            229,
+                        ):
+                            if decoded[0] == 2:
+                                Ed25519PublicKey.from_public_bytes(
+                                    decoded[133:165]
+                                ).verify(decoded[165:], decoded[:165])
+                            self._inbound[room_id][session_id] = GroupSession(
+                                b64e(decoded[133:165]),
+                                session_key,
+                                int.from_bytes(decoded[1:5], "big"),
+                                decoded[5:133],
+                                b"",
+                                int.from_bytes(decoded[1:5], "big"),
+                            )
+                    except (InvalidSignature, ValueError, TypeError):
+                        continue
+        self._outbound = {
+            room_id: GroupSession.from_dict(value)
+            for room_id, value in self._store.load_outbound_sessions().items()
+            if isinstance(value, dict)
+            and "session_id" in value
+            and "session_key" in value
+        }
 
-        stored_out = self._store.load_outbound_sessions()
-        for room_id in stored_out:
-            self._outbound[room_id] = olm.OutboundGroupSession()
-        log("TRACE", f"已为 {len(self._outbound)} 个房间创建出站 Megolm 会话")
-
-    def _try_import_session(
-        self, room_id: str, session_id: str, session_key: str
-    ) -> None:
-        """尝试从 session_key 导入入站会话，失败时记录警告。"""
-        try:
-            self._inbound[room_id][session_id] = olm.InboundGroupSession.import_session(
-                session_key
-            )
-        except olm.OlmGroupSessionError as e:
-            log(
-                "WARNING",
-                f"无法从 session_key 重建入站 Megolm 会话 {room_id}/{session_id}: {e}",
-            )
-
-    def _count_inbound(self) -> int:
-        return sum(len(s) for s in self._inbound.values())
-
-    # ------------------------------------------------------------------
-    # 出站会话 (加密发送)
-    # ------------------------------------------------------------------
-
-    def get_outbound_session(self, room_id: str) -> olm.OutboundGroupSession:
-        """获取房间的出站会话，如果不存在则创建新的。"""
+    def get_outbound_session(self, room_id: str) -> GroupSession:
         session = self._outbound.get(room_id)
         if session is None:
-            session = olm.OutboundGroupSession()
+            session = GroupSession.create()
             self._outbound[room_id] = session
             self._save_outbound()
         return session
 
     def get_outbound_session_id(self, room_id: str) -> str:
-        """返回房间当前出站 Megolm 会话的 session_id。"""
-        return self.get_outbound_session(room_id).id
+        return self.get_outbound_session(room_id).session_id
 
-    def encrypt(self, room_id: str, plaintext: str) -> dict:
-        """用 Megolm 加密明文，返回 m.room.encrypted 事件的内容。
-
-        加密后的内容包含 algorithm、ciphertext、sender_key 和 session_id。
-        """
+    def encrypt(self, room_id: str, plaintext: str) -> dict[str, str]:
         session = self.get_outbound_session(room_id)
         ciphertext = session.encrypt(plaintext)
+        self._save_outbound()
         return {
             "algorithm": "m.megolm.v1.aes-sha2",
             "ciphertext": ciphertext,
-            "sender_key": self._account().identity_keys["curve25519"],
-            "session_id": session.id,
-            "device_id": "...",  # 将由 CryptoEngine 在调用时填充
+            "sender_key": self._session_mgr._account_mgr.account.identity_keys[
+                "curve25519"
+            ],
+            "session_id": session.session_id,
         }
 
-    def rotate_outbound_session(self, room_id: str) -> olm.OutboundGroupSession:
-        """轮换房间的出站 Megolm 会话。
-
-        定期轮换可以提高前向安全性：旧的 ratchet 值被丢弃后，
-        即使密钥泄露也无法解密历史消息。
-        """
-        new_session = olm.OutboundGroupSession()
-        old_session = self._outbound.pop(room_id, None)
-        self._outbound[room_id] = new_session
+    def rotate_outbound_session(self, room_id: str) -> GroupSession:
+        session = GroupSession.create()
+        self._outbound[room_id] = session
         self._save_outbound()
-        if old_session:
-            log("TRACE", f"已轮换房间 {room_id} 的出站 Megolm 会话")
-        return new_session
-
-    # ------------------------------------------------------------------
-    # 入站会话 (解密接收)
-    # ------------------------------------------------------------------
+        return session
 
     def add_inbound_session(
         self, room_id: str, session_id: str, session_key: str
     ) -> bool:
-        """从共享的 session_key 创建入站 Megolm 会话。
-
-        当通过 Olm to-device 消息收到 m.room_key 时调用此方法。
-        session_key 是 OutboundGroupSession.session_key 的原始输出。
-
-        Args:
-            room_id: 房间 ID
-            session_id: 会话 ID
-            session_key: 原始 session_key（base64 编码）
-
-        Returns:
-            导入成功返回 True
-        """
         try:
-            session = olm.InboundGroupSession(session_key)
-            self._inbound.setdefault(room_id, {})[session_id] = session
-            self._save_inbound()
-            log("TRACE", f"已导入入站 Megolm 会话 {room_id}/{session_id}")
-            return True
-        except olm.OlmGroupSessionError as e:
-            log(
-                "WARNING",
-                f"导入入站 Megolm 会话失败 {room_id}/{session_id}: {e}",
-            )
+            decoded = b64d(session_key)
+            if len(decoded) not in (165, 229) or decoded[0] not in (1, 2):
+                return False
+            if b64e(decoded[133:165]) != session_id:
+                return False
+            if decoded[0] == 2:
+                Ed25519PublicKey.from_public_bytes(decoded[133:165]).verify(
+                    decoded[165:], decoded[:165]
+                )
+        except (InvalidSignature, ValueError, TypeError):
             return False
+        index = int.from_bytes(decoded[1:5], "big")
+        self._inbound.setdefault(room_id, {})[session_id] = GroupSession(
+            session_id, session_key, index, decoded[5:133], b"", index
+        )
+        self._save_inbound()
+        return True
 
     def decrypt(self, room_id: str, session_id: str, ciphertext: str) -> str | None:
-        """用匹配的入站会话解密密文。
-
-        Args:
-            room_id: 房间 ID
-            session_id: 会话 ID（来自加密事件的 session_id 字段）
-            ciphertext: base64 编码的密文
-
-        Returns:
-            解密后的明文字符串，如果找不到会话或解密失败返回 None
-        """
-        room_sessions = self._inbound.get(room_id)
-        if room_sessions is None:
-            log("TRACE", f"房间 {room_id} 没有入站 Megolm 会话")
-            return None
-
-        session = room_sessions.get(session_id)
+        session = self._inbound.get(room_id, {}).get(session_id)
         if session is None:
-            log(
-                "TRACE",
-                f"房间 {room_id} 缺少入站 Megolm 会话 {session_id}",
-            )
             return None
-
         try:
-            plaintext, _message_index = session.decrypt(ciphertext)
+            plaintext, _index = session.decrypt(ciphertext)
             return plaintext
-        except olm.OlmGroupSessionError as e:
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             log(
                 "WARNING",
-                f"Megolm 解密失败 ({room_id}/{session_id}): {e}",
+                f"Megolm record authentication failed for {room_id}/{session_id}",
             )
             return None
-
-    # ------------------------------------------------------------------
-    # 密钥共享
-    # ------------------------------------------------------------------
 
     async def share_session_key(
         self,
         adapter: Adapter,
         bot: Bot,
         room_id: str,
-        device_id: str,  # noqa: ARG002
+        device_id: str,
         members: list[str],
     ) -> int:
-        """向房间的所有成员设备共享当前出站 Megolm 会话密钥。
-
-        通过 Olm 加密的 m.room_key to-device 消息发送。
-        这是首次向加密房间发送消息前的必要步骤。
-
-        Args:
-            adapter: Adapter 实例（用于 API 调用）
-            bot: Bot 实例
-            room_id: 目标房间 ID
-            device_id: 本机的设备 ID
-            members: 房间成员 user_id 列表
-        """
+        del device_id
         session = self.get_outbound_session(room_id)
-        session_key = session.session_key
-        session_id = session.id
-
-        account = self._account()
-        my_curve25519 = account.identity_keys["curve25519"]
-        my_device_keys = self._session_mgr._account_mgr.build_device_keys(bot)
+        account = self._session_mgr._account_mgr.account
+        my_curve = account.identity_keys["curve25519"]
         my_ed25519 = account.identity_keys["ed25519"]
-
-        # 收集要发送的 to-device 消息
-        to_device_messages: dict[str, dict[str, dict]] = {}
-
+        device_keys = self._session_mgr._account_mgr.build_device_keys(bot)
+        messages: dict[str, dict[str, dict[str, Any]]] = {}
         for user_id in members:
             if user_id == str(bot.user_id):
                 continue
-
-            devices = self._device_keys.get_device_keys_for_user(user_id)
-            if not devices:
-                log("TRACE", f"用户 {user_id} 没有缓存的设备密钥，跳过密钥共享")
-                continue
-
-            for dev_id, dev_info in devices.items():
-                their_curve25519 = dev_info.get("keys", {}).get(f"curve25519:{dev_id}")
-                if their_curve25519 is None:
+            for remote_device, remote in self._device_keys.get_device_keys_for_user(
+                user_id
+            ).items():
+                remote_curve = remote.get("keys", {}).get(f"curve25519:{remote_device}")
+                if not isinstance(remote_curve, str):
                     continue
-
-                # 索取一次性密钥
-                one_time = await self._device_keys.claim_one_time_key(
-                    adapter, bot, user_id, dev_id
+                remote_key = await self._device_keys.claim_one_time_key(
+                    adapter, bot, user_id, remote_device
                 )
-                if one_time is None:
-                    # 尝试使用 fallback 密钥
-                    log("TRACE", f"无法索取 {user_id}/{dev_id} 的 OTK")
+                if remote_key is None:
                     continue
-
-                # 创建出站 Olm 会话
                 olm_session = self._session_mgr.create_outbound_session(
-                    their_curve25519, one_time
+                    remote_curve, remote_key
                 )
                 if olm_session is None:
                     continue
-
-                their_ed25519 = dev_info.get("keys", {}).get(f"ed25519:{dev_id}")
-                if not isinstance(their_ed25519, str):
-                    continue
-
-                # 构建 m.room_key 负载
-                room_key_payload = {
+                payload = {
+                    "type": "m.room_key",
                     "content": {
                         "algorithm": "m.megolm.v1.aes-sha2",
                         "room_id": room_id,
-                        "session_id": session_id,
-                        "session_key": session_key,
-                    },
-                    "keys": {
-                        "ed25519": my_ed25519,
-                    },
-                    "recipient": user_id,
-                    "recipient_keys": {
-                        "ed25519": their_ed25519,
+                        "session_id": session.session_id,
+                        "session_key": session.session_key,
                     },
                     "sender": str(bot.user_id),
-                    "sender_device_keys": my_device_keys,
-                    "type": "m.room_key",
+                    "sender_device": bot.device_id,
+                    "keys": {"ed25519": my_ed25519},
+                    "recipient": user_id,
+                    "recipient_keys": {
+                        "ed25519": remote.get("keys", {}).get(
+                            f"ed25519:{remote_device}", ""
+                        )
+                    },
+                    "sender_device_keys": device_keys,
                 }
-                import json
-
-                plaintext = json.dumps(room_key_payload, ensure_ascii=False)
-                encrypted_msg = self._session_mgr.encrypt(olm_session, plaintext)
-
-                # 将加密的 Olm 消息添加到 to-device 集合中
-                to_device_messages.setdefault(user_id, {})[dev_id] = {
+                encrypted = self._session_mgr.encrypt(
+                    olm_session, json.dumps(payload, separators=(",", ":"))
+                )
+                messages.setdefault(user_id, {})[remote_device] = {
                     "algorithm": "m.olm.v1.curve25519-aes-sha2",
-                    "sender_key": my_curve25519,
+                    "sender_key": my_curve,
                     "ciphertext": {
-                        their_curve25519: {
-                            "body": encrypted_msg.ciphertext,
-                            "type": encrypted_msg.message_type,
-                        },
+                        remote_curve: {
+                            "body": encrypted.ciphertext,
+                            "type": encrypted.message_type,
+                        }
                     },
                 }
-
-        if not to_device_messages:
+        if not messages:
             return 0
-
-        import uuid
-
-        txn_id = uuid.uuid4().hex
-        await adapter._api_send_to_device(  # type: ignore[union-attr]
+        await adapter._api_send_to_device(
             bot,
             event_type="m.room.encrypted",
-            txn_id=txn_id,
-            messages=to_device_messages,
+            txn_id=os.urandom(12).hex(),
+            messages=messages,
         )
-        total_devices = sum(len(d) for d in to_device_messages.values())
-        log(
-            "TRACE",
-            f"已向 {len(to_device_messages)} 个用户的 "
-            f"{total_devices} 个设备共享房间 {room_id} 的 Megolm 密钥",
-        )
-        return total_devices
-
-    # ------------------------------------------------------------------
-    # 内部辅助
-    # ------------------------------------------------------------------
-
-    def _account(self) -> olm.Account:
-        return self._session_mgr._account_mgr.account
+        return sum(len(devices) for devices in messages.values())
 
     def _save_inbound(self) -> None:
-        store_data: dict[str, dict[str, str]] = {}
-        for room_id, sessions in self._inbound.items():
-            store_data[room_id] = {}
-            for session_id, session in sessions.items():
-                try:
-                    store_data[room_id][session_id] = session.export_session(
-                        session.first_known_index
-                    )
-                except olm.OlmGroupSessionError:
-                    store_data[room_id][session_id] = session.id
-        self._store.save_inbound_sessions(store_data)
+        self._store.save_inbound_sessions(
+            {
+                room: {sid: session.session_key for sid, session in sessions.items()}
+                for room, sessions in self._inbound.items()
+            }
+        )
 
     def _save_outbound(self) -> None:
-        store_data: dict[str, dict[str, object]] = {}
-        for room_id, session in self._outbound.items():
-            store_data[room_id] = {
-                "session_id": session.id,
-                "session_key": session.session_key,
-                "message_index": session.message_index,
-            }
-        self._store.save_outbound_sessions(store_data)
+        self._store.save_outbound_sessions(
+            {room: session.to_dict() for room, session in self._outbound.items()}
+        )

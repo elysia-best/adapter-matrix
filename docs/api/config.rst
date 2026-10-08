@@ -14,6 +14,7 @@ Matrix 适配器使用 Pydantic 模型管理配置，支持从 ``.env`` 文件�
    - ``matrix_api_timeout`` — 普通 API 超时（秒），默认 ``30.0``。
    - ``matrix_sync_timeout`` — ``/sync`` long-poll 超时（毫秒），默认 ``30000``。
    - ``matrix_retry_interval`` — 网络错误重试间隔（秒），默认 ``3.0``。
+   - ``matrix_command_to_me`` — 是否将以 NoneBot 命令前缀开头的消息视为发给机器人，默认 ``false``。
    - ``matrix_handle_self_message`` — 是否处理自己的消息，默认 ``false``。
    - ``matrix_handle_old_events`` — 是否处理启动前的旧事件，默认 ``false``。
    - ``matrix_proxy`` — HTTP 代理地址，默认 ``None``。
@@ -56,7 +57,10 @@ Matrix 适配器使用 Pydantic 模型管理配置，支持从 ``.env`` 文件�
      * ``auto_accept_blacklist`` — 黑名单（优先级高于白名单）。
 
    **E2EE 配置**
+     * ``recovery_key`` — Matrix recovery key（只读现有密钥备份）。
      * ``recovery_code`` — MATRIX_RECOVERY_CODE（密钥恢复私钥）。
+     * ``secret_storage_passphrase`` — Secret Storage passphrase。
+     * ``matrix_auto_accept_verification`` — 全局开启后自动处理 SAS 验证（默认关闭）。
      * ``e2ee_store_path`` — E2EE 持久化目录。
 
    运行时字段（一般不需要手动设置）:

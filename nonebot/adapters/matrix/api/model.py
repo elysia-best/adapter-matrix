@@ -169,6 +169,8 @@ class SyncResponse(MatrixBaseModel):
     account_data: AccountData = Field(default_factory=AccountData)
     device_lists: DeviceLists | None = None
     to_device: AccountData | None = None
+    device_one_time_keys_count: dict[str, int] = Field(default_factory=dict)
+    device_unused_fallback_key_types: list[str] | None = None
 
 
 class RoomMessageContent(MatrixBaseModel):
@@ -239,19 +241,44 @@ class JoinRoomResponse(MatrixBaseModel):
     room_id: RoomId
 
 
+class LeaveRoomResponse(MatrixBaseModel):
+    room_id: RoomId | None = None
+
+
+class RoomStateResponse(MatrixBaseModel):
+    events: list[RawMatrixEvent] = Field(default_factory=list)
+
+
+class CreateRoomResponse(MatrixBaseModel):
+    room_id: RoomId
+
+
 # ------------------------------------------------------------------
 # E2EE 模型: m.room.encrypted 事件和 to-device 密钥消息
 # ------------------------------------------------------------------
 
 
-class EncryptedEventContent(MatrixBaseModel):
-    """m.room.encrypted 事件的内容。"""
+class MegolmEncryptedEventContent(MatrixBaseModel):
+    """Room ``m.megolm.v1.aes-sha2`` event content."""
 
     algorithm: str
     ciphertext: str
     sender_key: str
     session_id: str
     device_id: str | None = None
+
+
+class OlmEncryptedEventContent(MatrixBaseModel):
+    """To-device ``m.olm.v1.curve25519-aes-sha2`` event content."""
+
+    algorithm: str
+    sender_key: str
+    ciphertext: dict[str, dict[str, Any]]
+
+
+# Kept as a convenient import for callers that only need a generic encrypted
+# event type.  Validation uses the more precise models above at protocol edges.
+EncryptedEventContent = MegolmEncryptedEventContent
 
 
 class RoomKeyContent(MatrixBaseModel):
@@ -264,6 +291,9 @@ class RoomKeyContent(MatrixBaseModel):
     room_id: str
     session_id: str
     session_key: str
+    sender_key: str | None = None
+    sender_claimed_ed25519_key: str | None = None
+    forwarding_curve25519_key_chain: list[str] = Field(default_factory=list)
 
 
 class ForwardedRoomKeyContent(MatrixBaseModel):
@@ -283,6 +313,7 @@ class ForwardedRoomKeyContent(MatrixBaseModel):
 
 __all__ = (
     "AccountData",
+    "CreateRoomResponse",
     "DeviceLists",
     "EncryptedEventContent",
     "EventIdResponse",
@@ -291,6 +322,7 @@ __all__ = (
     "InvitedRoomSync",
     "JoinRoomResponse",
     "JoinedRoomSync",
+    "LeaveRoomResponse",
     "LeftRoomSync",
     "LoginFlow",
     "LoginFlowsResponse",
@@ -299,8 +331,10 @@ __all__ = (
     "MatrixBaseModel",
     "MatrixError",
     "MediaConfigResponse",
+    "MegolmEncryptedEventContent",
     "MembersChunkResponse",
     "MessagesResponse",
+    "OlmEncryptedEventContent",
     "PasswordLoginRequest",
     "PresenceSync",
     "RawMatrixEvent",
@@ -315,6 +349,7 @@ __all__ = (
     "RoomKeyContent",
     "RoomMemberContent",
     "RoomMessageContent",
+    "RoomStateResponse",
     "RoomsSync",
     "State",
     "SyncResponse",

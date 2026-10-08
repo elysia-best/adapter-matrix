@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import base64
 import json
-import re
 from typing import TYPE_CHECKING, Any
 
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
     X25519PublicKey,
@@ -22,6 +22,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from .secret_storage import decode_recovery_key
 from ..utils import log
 
 if TYPE_CHECKING:
@@ -44,6 +45,73 @@ class KeyRecovery:
     def __init__(self, store: CryptoStore, megolm_mgr: MegolmManager) -> None:
         self._store = store
         self._megolm = megolm_mgr
+
+    async def recover_from_secret_storage(
+        self, adapter: Adapter, bot: Bot, passphrase: str
+    ) -> int:
+        """Unlock SSSS and recover the encrypted Megolm backup key.
+
+        Homeservers expose SSSS as account-data events.  This method only
+        reads those events and the existing room-key backup; it never creates,
+        rotates, or uploads a backup.
+        """
+        from .secret_storage import decrypt_secret, derive_passphrase_key
+
+        default = await adapter._api_get_account_data(  # type: ignore[union-attr]
+            bot, event_type="m.secret_storage.default_key"
+        )
+        key_id = default.get("key") or default.get("default_key")
+        if not isinstance(key_id, str) or not key_id:
+            raise ValueError("Secret Storage has no default key")
+        key_event = await adapter._api_get_account_data(  # type: ignore[union-attr]
+            bot, event_type=f"m.secret_storage.key.{key_id}"
+        )
+        passphrase_data = key_event.get("passphrase")
+        if not isinstance(passphrase_data, dict):
+            raise ValueError("Secret Storage key has no passphrase metadata")
+        salt = passphrase_data.get("salt")
+        iterations = passphrase_data.get("iterations", 500_000)
+        if not isinstance(salt, str) or not isinstance(iterations, int):
+            raise ValueError("invalid Secret Storage passphrase metadata")
+        key = derive_passphrase_key(
+            passphrase,
+            salt=salt,
+            iterations=iterations,
+            bits=int(passphrase_data.get("bits", 256)),
+        )
+        # Some clients include an encrypted copy of the SSSS key in the key
+        # event.  When absent, the PBKDF2 result is itself the SSSS key.
+        encrypted_key = key_event.get("encrypted")
+        if isinstance(encrypted_key, dict):
+            key = decrypt_secret(key, encrypted_key)
+        secret = await adapter._api_get_account_data(  # type: ignore[union-attr]
+            bot, event_type="m.megolm_backup.v1"
+        )
+        encrypted_secrets = secret.get("encrypted")
+        encrypted_secret = (
+            encrypted_secrets.get(key_id)
+            if isinstance(encrypted_secrets, dict)
+            else None
+        )
+        if not isinstance(encrypted_secret, dict):
+            raise ValueError("Megolm backup secret is not stored in Secret Storage")
+        backup = decrypt_secret(key, encrypted_secret)
+        try:
+            payload = json.loads(backup.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("invalid Megolm backup secret") from exc
+        private_value = (
+            payload.get("private_key") if isinstance(payload, dict) else None
+        )
+        if not isinstance(private_value, str):
+            raise ValueError("Megolm backup secret has no private key")
+        private_key = self._b64decode(private_value)
+        if len(private_key) != 32:
+            raise ValueError("Megolm backup private key must be 32 bytes")
+        import base58
+
+        recovery_code = base58.b58encode(b"\x8b\x01" + private_key).decode("ascii")
+        return await self.recover_from_backup(adapter, bot, recovery_code)
 
     async def recover_from_backup(
         self, adapter: Adapter, bot: Bot, recovery_code: str
@@ -81,10 +149,30 @@ class KeyRecovery:
             return 0
 
         auth_data = version_info.get("auth_data", {})
+        if not isinstance(auth_data, dict):
+            log("WARNING", "备份 auth_data 格式无效")
+            return 0
         backup_public_key = auth_data.get("public_key")
-        if backup_public_key is None:
+        if not isinstance(backup_public_key, str):
             log("WARNING", "备份 auth_data 缺少 public_key")
             return 0
+        actual_public_key = (
+            base64.b64encode(
+                X25519PrivateKey.from_private_bytes(private_key_bytes)
+                .public_key()
+                .public_bytes(
+                    serialization.Encoding.Raw, serialization.PublicFormat.Raw
+                )
+            )
+            .decode("ascii")
+            .rstrip("=")
+        )
+
+        def normalise(value: str) -> str:
+            return value.replace("+", "-").replace("/", "_").rstrip("=")
+
+        if normalise(actual_public_key) != normalise(backup_public_key):
+            raise ValueError("recovery key does not match backup public key")
 
         log("INFO", f"正在从密钥备份版本 {version} 恢复会话...")
 
@@ -110,7 +198,9 @@ class KeyRecovery:
                     continue
                 session_data = session_info.get("session_data", {})
                 try:
-                    session_key = self._decrypt_session_data(private_key_bytes, session_data)
+                    session_key = self._decrypt_session_data(
+                        private_key_bytes, session_data
+                    )
                     if session_key:
                         if self._megolm.add_inbound_session(
                             room_id, session_id, session_key
@@ -125,6 +215,52 @@ class KeyRecovery:
 
         log("INFO", f"从密钥备份恢复了 {recovered} 个 Megolm 会话密钥")
         return recovered
+
+    async def recover_session_from_backup(
+        self,
+        adapter: Adapter,
+        bot: Bot,
+        recovery_code: str,
+        room_id: str,
+        session_id: str,
+    ) -> bool:
+        """Fetch and import one missing room key, then let decryption retry."""
+        private_key = self._decode_recovery_key(recovery_code)
+        version_info = await adapter._api_room_keys_version(bot)  # type: ignore[union-attr]
+        version = version_info.get("version")
+        if not isinstance(version, str):
+            return False
+        auth_data = version_info.get("auth_data")
+        backup_public_key = auth_data.get("public_key") if isinstance(auth_data, dict) else None
+        if not isinstance(backup_public_key, str):
+            return False
+        actual_public_key = base64.b64encode(
+            X25519PrivateKey.from_private_bytes(private_key)
+            .public_key()
+            .public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        ).decode("ascii").rstrip("=")
+
+        def normalise(value: str) -> str:
+            return value.replace("+", "-").replace("/", "_").rstrip("=")
+
+        if normalise(actual_public_key) != normalise(backup_public_key):
+            return False
+        response = await adapter._api_room_keys_keys(  # type: ignore[union-attr]
+            bot, room_id=room_id, session_id=session_id, version=version
+        )
+        session_info = response.get("session_data")
+        if not isinstance(session_info, dict):
+            session_info = (
+                response.get("rooms", {})
+                .get(room_id, {})
+                .get("sessions", {})
+                .get(session_id, {})
+                .get("session_data")
+            )
+        if not isinstance(session_info, dict):
+            return False
+        key = self._decrypt_session_data(private_key, session_info)
+        return bool(key and self._megolm.add_inbound_session(room_id, session_id, key))
 
     # ------------------------------------------------------------------
     # 备份解密算法: m.megolm_backup.v1.curve25519-aes-sha2
@@ -269,61 +405,4 @@ class KeyRecovery:
             <base58 data>
             -----END MATRIX PRIVATE KEY-----
         """
-        import base58 as base58_lib
-
-        code = recovery_code.strip()
-        # 移除可能的 PEM 页眉页脚
-        if code.startswith("-----BEGIN"):
-            lines = code.splitlines()
-            code = "".join(
-                line.strip()
-                for line in lines
-                if line.strip() and not line.startswith("-----")
-            )
-
-        # 去除空白字符（Matrix recovery code 通常以空格分组显示）
-        code = re.sub(r"\s+", "", code)
-
-        try:
-            decoded = base58_lib.b58decode(code)
-        except Exception as e:
-            log("ERROR", f"base58 解码 recovery code 失败: {e}")
-            msg = f"无效的 recovery code: {e}"
-            raise ValueError(msg) from e
-
-        # Matrix recovery key 结构 (Matrix Spec Appendices):
-        #
-        #   字节数组 = 0x8B || 0x01 || raw_key(32 bytes) || parity(1 byte)
-        #
-        #   其中:
-        #   - 0x8B: 密钥类型标识 (Curve25519)
-        #   - 0x01: 版本号
-        #   - raw_key: Curve25519 私钥 (32 bytes)
-        #   - parity: 全部前序字节的 XOR 校验和
-        #
-        #   部分旧实现可能省略版本号或校验字节。
-        key = decoded
-        log("TRACE", f"recovery key 解码后共 {len(key)} 字节 (hex: {key.hex()})")
-
-        # 移除 0x8B 0x01 双字节头 (Matrix Spec 格式)
-        if len(key) >= 34 and key[0] == 0x8B and key[1] == 0x01:
-            key = key[2:]  # 移除双字节头
-            # 如果末尾还有校验字节 (总长 35 的情况)，移除末尾 1 字节
-            if len(key) > 32:
-                key = key[:32]
-        # 回退: 仅移除 0x8B 单字节头 (旧实现)
-        elif len(key) >= 33 and key[0] == 0x8B:
-            key = key[1:]  # 移除单字节头
-            if len(key) > 32:
-                key = key[:32]
-
-        if len(key) != 32:
-            log(
-                "WARNING",
-                f"recovery key 解码后长度为 {len(key)} (期望 32)",
-            )
-            # 仍尝试使用
-            if len(key) > 32:
-                key = key[:32]
-
-        return key
+        return decode_recovery_key(recovery_code)

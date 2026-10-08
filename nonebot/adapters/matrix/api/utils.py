@@ -18,3 +18,12 @@ def filter_unset_query(params: dict[str, Any]) -> dict[str, Any]:
         for key, value in params.items()
         if value is not UNSET and value is not None
     }
+
+
+def filter_query(params: dict[str, Any]) -> dict[str, Any]:
+    """Remove unset values and encode booleans as Matrix query literals."""
+    return {
+        key: str(value).lower() if isinstance(value, bool) else value
+        for key, value in params.items()
+        if value is not UNSET and value is not None
+    }
