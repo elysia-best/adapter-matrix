@@ -1,16 +1,16 @@
 # 端到端加密（E2EE）
 
-适配器支持 Matrix 端到端加密房间，使用纯 Python 加密状态机处理设备密钥、to-device 消息和房间会话。
+适配器支持 Matrix 端到端加密房间，使用上游 `python3-olm` 的 libolm 实现 Olm v1、Megolm v1、SAS 和备份加密，并以 SQLite 保存加密状态。
 
 ## 前置条件
 
-E2EE 依赖 `cryptography`，不需要安装 libolm 或其他平台相关的 Olm 扩展。
+安装适配器时会安装 `python3-olm` 和 `cryptography`。运行环境必须能加载 libolm 3.2 或更新版本。
 
-当前后端提供架构无关的纯 Python 状态机和认证加密记录，适合在适配器内持久化和测试；它不读取旧 libolm pickle。与 Element 或 matrix-rust-sdk 的完整标准 Olm/Megolm ratchet 互操作仍需要专门的协议向量验证，不能仅凭同名的 Matrix 算法字段推断兼容。
+状态格式是新的版本化 SQLite 数据库。旧的 JSON、pickle 或自有状态不会迁移，也不会删除；检测到旧格式、损坏状态或设备身份冲突时，适配器会报错并要求新设备或新目录。
 
 ## 启用 E2EE
 
-E2EE 是 **opt-in** 的：只有配置了 `e2ee_store_path` 或 `MATRIX_TOKEN_STORE_PATH` 时才会启用。
+E2EE 默认启用。需要运行明文设备时，显式设置 `"e2ee_enabled": false`。
 
 ```text
 MATRIX_BOTS='[
@@ -26,13 +26,17 @@ MATRIX_BOTS='[
 ]'
 ```
 
-如果只配置了 `MATRIX_TOKEN_STORE_PATH`，存储路径会从该路径的同级目录自动派生（如 `e2ee_<hash>_<user>`）。两个都未设置则 E2EE 完全禁用。
+`e2ee_store_path` 优先使用；未设置时从 token store 同目录或 `.data/matrix/e2ee/` 派生由 homeserver、用户和设备 ID 绑定的独立目录。目录权限为 `0700`，私密文件权限为 `0600`。
 
 ## 配置字段
 
 - `e2ee_store_path` — E2EE 密钥和会话持久化目录。包含 Olm 账户密钥、Megolm 会话、设备密钥缓存等。
-- `recovery_key` — Matrix recovery key，从服务端密钥备份恢复 Megolm 会话密钥。
+- `recovery_key` — Matrix Secret Storage recovery key，用于恢复交叉签名秘密和备份私钥；备份私钥也可通过 `backups().enable(private_key)` 单独导入。
 - `secret_storage_passphrase` — 读取现有 Secret Storage 及备份密钥。
+- `e2ee_enabled` — 是否初始化 E2EE，默认 `true`。
+- `auto_enable_cross_signing`、`auto_enable_backups` — 是否在启动时创建对应状态，默认均为 `false`。
+- `backup_download_strategy` — `Manual`、`OneShot` 或 `AfterDecryptionFailure`。
+- `encryption_sharing_strategy` — `AllDevices`、`ErrorOnVerifiedUserProblem`、`IdentityBasedStrategy` 或 `OnlyTrustedDevices`。
 
 ## 工作原理
 
@@ -40,12 +44,12 @@ MATRIX_BOTS='[
 
 Bot 启动时，加密引擎执行以下步骤：
 
-1. **加载或创建 Olm 账户**：生成 Ed25519 签名密钥和 Curve25519 加密密钥对。
+1. **加载或创建 libolm 账户**：生成 Ed25519 签名密钥和 Curve25519 加密密钥对。
 2. **恢复持久化会话**：加载已保存的 Olm 会话和 Megolm 入站/出站会话。
 3. **上传身份密钥**：将设备密钥（带自签名）上传到 homeserver。
 4. **补充一次性密钥（OTK）**：确保每个 device 至少有一定数量的 signed_curve25519 OTK。
 5. **上传 fallback 密钥**：当 OTK 耗尽时使用。
-6. **密钥备份恢复**：如果配置了 `recovery_code`，从服务端备份拉取并解密所有可恢复的 Megolm 会话密钥。
+6. **密钥备份恢复**：只有调用恢复操作或配置恢复凭据时才执行，不会把恢复密钥发送给插件事件。
 
 ### 进入加密房间
 
@@ -65,7 +69,7 @@ Bot 启动时，加密引擎执行以下步骤：
 
 1. 检查本地是否已有对应的入站 Megolm 会话。
 2. 如果有，解密得到明文，分派给插件处理。
-3. 如果没有（可能还没收到 key），跳过该事件并记录 trace 日志。
+3. 如果没有（可能还没收到 key），持久化待解密事件并发出密钥请求；密钥到达后自动重试。
 
 ### 设备列表跟踪
 
@@ -83,12 +87,12 @@ Bot 启动时，加密引擎执行以下步骤：
 | `m.room.encrypted` (Olm) | 解密后递归处理内部包裹的 `m.room_key` 等事件 |
 | `m.room_key` | 导入 Megolm 入站会话密钥 |
 | `m.forwarded_room_key` | 转发的 Megolm 会话密钥 |
-| `m.room_key_request` | 密钥请求（记录但不自动重发） |
+| `m.room_key_request` | 密钥请求（只向自己的已验证设备转发） |
 | `m.room_key.withheld` | 密钥被拒通知 |
 
 ## 密钥恢复
 
-当配置了 `recovery_key`（`recovery_code` 为兼容别名）或 `secret_storage_passphrase` 时：
+当配置了 `recovery_key`（`recovery_code` 为兼容别名）或显式调用恢复操作时：
 
 1. 启动时加密引擎调用 `/room_keys/version` 获取最新备份版本。
 2. 遍历该版本下的所有 `room_id → session_id → session_data`。
@@ -99,7 +103,8 @@ Bot 启动时，加密引擎执行以下步骤：
 
 ## 注意事项
 
-- **持久化**：E2EE 状态（Olm 账户、Megolm 会话、设备密钥缓存）会持久化到 `e2ee_store_path`。如果未设置且未提供 `MATRIX_TOKEN_STORE_PATH`，加密引擎完全不会初始化。
-- **存储格式**：加密状态以版本化 JSON 保存。旧的 `python3-olm` pickle 不会被加载，升级后会创建新的设备密钥状态。
-- **密钥验证**：默认关闭自动 SAS。设置全局 `MATRIX_AUTO_ACCEPT_VERIFICATION=true` 后才会自动接受协议支持的 SAS 请求；无效流程不会被标记为成功。
+- **持久化**：E2EE 状态（Olm 账户、Megolm 会话、设备密钥缓存、验证和备份进度）会持久化到绑定身份的 SQLite 数据库。
+- **密钥验证**：`matrix_auto_accept_verification` 只自动接受请求，不会自动确认 SAS 数字、emoji 或二维码；插件必须调用 `confirm()`。
+- **公开对象**：使用 `bot.encryption()`、`bot.get_room(room_id)`、`Device`、`UserIdentity`、`VerificationRequest`、`SasVerification` 和 `QrVerification` 管理状态。
+- **附件**：加密房间中的 bytes 媒体上传前使用 Matrix v2 附件格式加密，接收端通过 `download_encrypted_file()` 校验并解密。
 - **首次消息延迟**：进入新加密房间发送首条消息时，需要先向所有成员设备共享 Megolm 密钥，可能有一定延迟。

@@ -56,6 +56,7 @@ async def test_sync_request_builds_query(dummy_bot: DummyBot) -> None:
 @pytest.mark.asyncio
 async def test_send_event_url_encodes_matrix_ids(dummy_bot: DummyBot) -> None:
     dummy_bot.adapter.content = b'{"event_id":"$sent:example.org"}'
+    dummy_bot.adapter.responses = [(200, b"[]")]
 
     await dummy_bot.send_event(
         room_id="!room:example.org",

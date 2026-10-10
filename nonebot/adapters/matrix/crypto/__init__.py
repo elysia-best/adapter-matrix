@@ -1,572 +1,853 @@
-"""CryptoEngine — E2EE 加密引擎，编排所有加密子系统。
+"""Default-on Matrix E2EE using upstream python3-olm.
 
-CryptoEngine 是加密子系统的顶层入口，负责:
-- 在 Bot 启动时初始化 Olm 账户和密钥上传
-- 在每个同步周期处理 device_lists 和 to_device 事件
-- 加密发出的房间消息和解密收到的房间消息
-- 管理房间加密状态和密钥共享
-
-E2EE 是 opt-in 的: 只有当 BotInfo 配置了 e2ee_store_path
-或 matrix_token_store_path 时才会初始化加密引擎。
+The engine owns cryptographic state and reliable outgoing requests. Network I/O
+continues to use the adapter's transport and authentication implementation.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
+from uuid import uuid4
+
+import olm
 
 from .account import OlmAccountManager
+from .attachments import decrypt_attachment, export_room_keys, import_room_keys
 from .device_keys import DeviceKeyStore
-from .machine import CryptoMachine, SyncChanges
+from .identities import CrossSigning, Device, UserDevices, UserIdentity
 from .megolm import MegolmManager
-from .recovery import KeyRecovery
+from .primitives import MEGOLM_ALGORITHM, OLM_ALGORITHM, canonical_json
+from .recovery import Backups, Recovery
+from .secret_storage import SECRETS, SecretStorage
 from .sessions import OlmSessionManager
 from .store import CryptoStore
+from .types import (
+    BackupDownloadStrategy,
+    CollectStrategy,
+    CryptoError,
+    DecryptionError,
+    LocalTrust,
+    Observable,
+    TaskLock,
+    VerificationState,
+)
 from .verification import VerificationManager
 from ..api.model import RawMatrixEvent
+from ..exception import ActionFailed
 from ..utils import log
-
-if TYPE_CHECKING:
-    from ..adapter import Adapter
-    from ..bot import Bot
 
 
 class CryptoEngine:
-    """E2EE 加密引擎。
-
-    属性:
-        _bot: Bot 实例
-        _adapter: Adapter 实例 (用于 API 调用)
-        _store: 持久化存储
-        _account: Olm 账户管理器
-        _sessions: Olm 会话管理器
-        _megolm: Megolm 群组会话管理器
-        _device_keys: 设备密钥缓存
-        _recovery: 密钥备份恢复
-        _room_encrypted: 房间加密状态缓存 {room_id: {"encrypted": bool, "algorithm": str}}
-    """
-
-    def __init__(self, bot: Bot, adapter: Adapter) -> None:
-        self._bot = bot
-        self._adapter = adapter
-
-        # 确定存储路径
-        bot_info = bot.bot_info
-        if bot_info.e2ee_store_path:
-            store_dir = Path(bot_info.e2ee_store_path)
-        elif adapter.matrix_config.matrix_token_store_path:  # type: ignore[union-attr]
-            base = (
-                Path(adapter.matrix_config.matrix_token_store_path).parent  # type: ignore[union-attr]
+    def __init__(self, bot: Any, adapter: Any) -> None:
+        self.bot, self.adapter = bot, adapter
+        self.user_id, self.device_id = str(bot.user_id), bot.device_id
+        if not self.device_id:
+            raise CryptoError(
+                "Default E2EE requires a device ID; use a device-bound token or explicitly disable E2EE"
             )
-            h = hashlib.sha256(bot_info.homeserver.encode()).hexdigest()[:8]
-            user_part = str(bot.user_id).split(":")[0].lstrip("@")
-            store_dir = base / f"e2ee_{h}_{user_part}"
+        identity = (bot.bot_info.homeserver.rstrip("/"), self.user_id, self.device_id)
+        digest = hashlib.sha256(canonical_json(identity).encode()).hexdigest()
+        if bot.bot_info.e2ee_store_path:
+            directory = Path(bot.bot_info.e2ee_store_path)
+        elif adapter.matrix_config.matrix_token_store_path:
+            directory = (
+                Path(adapter.matrix_config.matrix_token_store_path).parent
+                / "e2ee"
+                / digest
+            )
         else:
-            msg = "E2EE 存储路径或 matrix_token_store_path 未配置，无法初始化加密引擎"
-            raise RuntimeError(msg)
-
-        self._store = CryptoStore(store_dir)
-        self._account = OlmAccountManager(self._store)
-        self._sessions = OlmSessionManager(self._store, self._account)
-        self._device_keys = DeviceKeyStore(self._store)
-        self._megolm = MegolmManager(self._store, self._sessions, self._device_keys)
-        self._recovery = KeyRecovery(self._store, self._megolm)
-        self.machine = CryptoMachine(self._store, self._megolm)
-        self._verification = VerificationManager(adapter, bot)
-
-        # 房间加密状态缓存
-        self._room_encrypted: dict[str, dict] = {}
-        # {room_id: session_id}，记录当前 outbound session 是否已共享过
-        self._shared_outbound_sessions: dict[str, str] = {}
-
-    # ------------------------------------------------------------------
-    # 初始化
-    # ------------------------------------------------------------------
+            directory = Path(".data/matrix/e2ee") / digest
+        self.store = CryptoStore(directory, identity)
+        self.account = OlmAccountManager(self.store)
+        self.sessions = OlmSessionManager(self.store, self.account)
+        self.megolm = MegolmManager(self.store)
+        self.devices = DeviceKeyStore(self.store)
+        self.cross_signing = CrossSigning(self)
+        self.verifications = VerificationManager(self)
+        self._backups, self._recovery = Backups(self), Recovery(self)
+        self._verification_state = Observable(VerificationState.UNKNOWN)
+        self._lock = TaskLock()
+        self._outgoing_lock = asyncio.Lock()
+        self._tasks: set[asyncio.Task[Any]] = set()
+        self.ready = False
+        for name in self.store.names("room/"):
+            self.bot._encryption_states[name.removeprefix("room/")] = self.store.get(
+                name
+            )
+        # Deprecated compatibility spellings for existing adapter extensions.
+        self._account, self._sessions, self._megolm = (
+            self.account,
+            self.sessions,
+            self.megolm,
+        )
+        self._store, self._device_keys = self.store, self.devices
 
     async def initialize(self) -> None:
-        """在 Bot 启动时初始化加密引擎。
-
-        执行步骤:
-        1. 加载或创建 OlmAccount (Ed25519 + Curve25519 密钥对)
-        2. 加载持久化的 Olm 会话和 Megolm 会话
-        3. 加载设备密钥缓存和房间加密状态
-        4. 上传设备身份密钥到 homeserver
-        5. 确保有足够的一次性密钥 (OTK)
-        6. 上传 fallback 密钥作为备用
-        7. 如果配置了 MATRIX_RECOVERY_CODE，恢复备份的 Megolm 会话
-        """
-        # 1-3: 加载持久化状态
-        self._account.load_or_create()
-        self._sessions.load()
-        self._megolm.load()
-        self._device_keys.load()
-        self._room_encrypted = self._store.load_room_state()
-
-        # 4-6: 上传密钥到 homeserver
-        identity_upload: dict[str, object] = {}
-        try:
-            identity_upload = await self._account.upload_identity_keys(
-                self._adapter, self._bot
+        self.account.load_or_create()
+        await self.devices.query(self, [self.user_id])
+        remote = self.devices.get_device_key(self.user_id, self.device_id)
+        expected = self.account.build_device_keys(self.bot)
+        if remote and remote["keys"]["keys"] != expected["keys"]:
+            raise CryptoError(
+                "Device identity already exists with different keys; use a new device and store"
             )
-        except Exception as e:
-            log("WARNING", f"上传设备身份密钥失败: {type(e).__name__}: {e}")
-
-        try:
-            await self._account.ensure_one_time_keys(
-                self._adapter,
-                self._bot,
-                key_upload_response=identity_upload,
+        await self.flush_requests()
+        if not self.store.get("identity_uploaded", False):
+            await self.request(
+                "keys_upload", {"device_keys": expected}, purpose="identity_upload"
             )
-        except Exception as e:
-            log("WARNING", f"补充一次性密钥失败: {type(e).__name__}: {e}")
-
-        try:
-            await self._account.upload_fallback_key(self._adapter, self._bot)
-        except Exception as e:
-            log("WARNING", f"上传 fallback 密钥失败: {type(e).__name__}: {e}")
-
-        # 7: 从恢复码恢复 Megolm 会话
-        recovery_code = (
-            self._bot.bot_info.recovery_key or self._bot.bot_info.recovery_code
+        await self.devices.query(self, [self.user_id])
+        if self.devices.get_device_key(self.user_id, self.device_id):
+            self.devices.set_trust(self.user_id, self.device_id, LocalTrust.VERIFIED)
+        response = await self.call("keys_upload")
+        await self.account.replenish(
+            self, response.get("one_time_key_counts", {}), None
         )
-        passphrase = self._bot.bot_info.secret_storage_passphrase
-        if recovery_code or passphrase:
-            try:
-                if recovery_code:
-                    count = await self._recovery.recover_from_backup(
-                        self._adapter, self._bot, recovery_code
-                    )
-                else:
-                    count = await self._recovery.recover_from_secret_storage(
-                        self._adapter, self._bot, passphrase or ""
-                    )
-                log("INFO", f"从密钥备份恢复了 {count} 个 Megolm 会话")
-            except ValueError:
-                # Credential and backup mismatches are actionable.  Do not
-                # turn an invalid key into a successful-looking empty restore.
-                raise
-            except Exception as e:
-                log(
-                    "WARNING",
-                    f"密钥备份恢复失败: {type(e).__name__}: {e}",
+        self.ready = True
+        info = self.bot.bot_info
+        if info.auto_enable_cross_signing:
+            await self.cross_signing.bootstrap()
+        credential = info.recovery_key or info.secret_storage_passphrase
+        if credential:
+            await self.recovery().recover(credential)
+        elif info.auto_enable_backups:
+            await self.recovery().enable_backup()
+        self.update_verification_state()
+
+    async def close(self) -> None:
+        for task in tuple(self._tasks):
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        self.store.close()
+
+    async def call(self, api: str, **body: Any) -> Any:
+        method = getattr(self.adapter, f"_api_{api}")
+        return await method(self.bot, **body)
+
+    async def emit(
+        self, kind: str, content: dict[str, Any], *, handle: Any = None
+    ) -> None:
+        from ..event import CRYPTO_EVENT_CLASSES
+
+        event = CRYPTO_EVENT_CLASSES[kind](
+            type=f"matrix.crypto.{kind}",
+            content=content,
+            sender=content.get("user_id", self.user_id),
+            room_id=content.get("room_id"),
+            handle=handle,
+        )
+        # Plugin handlers can call back into the engine. Dispatch outside the
+        # mutation lock, and track tasks so shutdown never leaves users waiting.
+        task = asyncio.create_task(self.bot.handle_event(event))
+        self._tasks.add(task)
+        task.add_done_callback(self._event_done)
+
+    def _event_done(self, task: asyncio.Task[Any]) -> None:
+        self._tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            log("ERROR", f"E2EE plugin event handler failed: {task.exception()}")
+
+    async def request(
+        self,
+        api: str,
+        body: dict[str, Any],
+        *,
+        purpose: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> Any:
+        request_id = uuid4().hex
+        record = {
+            "api": api,
+            "body": body,
+            "purpose": purpose,
+            "metadata": metadata or {},
+        }
+        self.store.put(f"outgoing/{request_id}", record)
+        async with self._outgoing_lock:
+            return await self._execute(request_id, record)
+
+    async def _execute(self, request_id: str, record: dict[str, Any]) -> Any:
+        result = await self.call(record["api"], **record["body"])
+        if record["api"] == "keys_signatures_upload" and result.get("failures"):
+            raise CryptoError("Server rejected signatures")
+        with self.store.transaction():
+            if record["purpose"] == "publish_keys":
+                self.account.published(record["body"])
+            elif record["purpose"] == "identity_upload":
+                self.store.put("identity_uploaded", True)
+            elif record["purpose"] == "backup_upload":
+                for name in record["metadata"]["names"]:
+                    value = self.store.get(name)
+                    if value:
+                        value["backed_up"] = record["metadata"]["version"]
+                        self.store.put(name, value)
+            self.store.delete(f"outgoing/{request_id}")
+        return result
+
+    async def flush_requests(self) -> None:
+        async with self._outgoing_lock:
+            for name in self.store.names("outgoing/"):
+                await self._execute(
+                    name.removeprefix("outgoing/"), self.store.get(name)
                 )
 
-        log("INFO", "E2EE 加密引擎初始化完成")
-
-    # ------------------------------------------------------------------
-    # 房间加密状态
-    # ------------------------------------------------------------------
-
-    def is_room_encrypted(self, room_id: str) -> bool:
-        """检查房间是否已启用端到端加密。
-
-        只有当房间的 m.room.encryption 状态事件被处理后
-        才会标记为已加密。
-        """
-        state = self._room_encrypted.get(room_id)
-        return state is not None and state.get("encrypted", False)
-
-    def mark_room_as_encrypted(self, room_id: str, algorithm: str) -> None:
-        """根据 m.room.encryption 状态事件标记房间为已加密。
-
-        当同步循环在 state.events 中检测到此事件时调用。
-        """
-        self._room_encrypted[room_id] = {
-            "encrypted": True,
-            "algorithm": algorithm,
-        }
-        self._store.save_room_state(self._room_encrypted)
-        log("TRACE", f"房间 {room_id} 已标记为加密 (algorithm={algorithm})")
-
-    # ------------------------------------------------------------------
-    # 设备列表处理
-    # ------------------------------------------------------------------
-
-    async def handle_device_lists(self, changed: list[str], left: list[str]) -> None:
-        """处理同步响应中的 device_lists 变更。
-
-        changed: 设备列表发生变化的用户 ID 列表 → 查询新密钥
-        left: 离开的用户 ID 列表 → 清理本地缓存
-        """
-        if changed:
-            self._device_keys.mark_for_query(changed)
-            await self._device_keys.query_keys(self._adapter, self._bot)
-        if left:
-            self._device_keys.mark_left(left)
-
-    def receive_sync_changes(
-        self,
-        *,
-        changed: list[str],
-        left: list[str],
-        to_device_events: list[RawMatrixEvent],
-        next_batch: str | None = None,
-        one_time_key_counts: dict[str, int] | None = None,
+    async def send_to_device(
+        self, user_id: str, device_id: str, event_type: str, content: dict[str, Any]
     ) -> None:
-        """Feed a sync response into the network-independent machine."""
-
-        self.machine.receive_sync_changes(
-            SyncChanges(
-                changed_users=changed,
-                left_users=left,
-                to_device_events=[event.model_dump() for event in to_device_events],
-                next_batch=next_batch,
-                one_time_key_counts=one_time_key_counts or {},
-            )
+        await self.request(
+            "send_to_device",
+            {
+                "event_type": event_type,
+                "txn_id": uuid4().hex,
+                "messages": {user_id: {device_id: content}},
+            },
         )
 
-    # ------------------------------------------------------------------
-    # To-Device 事件处理
-    # ------------------------------------------------------------------
+    async def send_encrypted_to_device(
+        self, user_id: str, device_id: str, event_type: str, content: dict[str, Any]
+    ) -> None:
+        record = self.devices.get_device_key(user_id, device_id)
+        if record is None:
+            await self.devices.query(self, [user_id])
+            record = self.devices.get_device_key(user_id, device_id)
+        if not record or record.get("local_trust") == LocalTrust.BLACKLISTED:
+            raise CryptoError("Unknown or blacklisted device")
+        keys = record["keys"]["keys"]
+        curve, ed = keys[f"curve25519:{device_id}"], keys[f"ed25519:{device_id}"]
+        session = self.sessions.get(curve)
+        if session is None:
+            key = await self.devices.claim(self, user_id, device_id)
+            session = self.sessions.create_outbound_session(curve, key)
+        identity = self.account.account.identity_keys
+        payload = {
+            "sender": self.user_id,
+            "sender_device": self.device_id,
+            "keys": {"ed25519": identity["ed25519"]},
+            "recipient": user_id,
+            "recipient_keys": {"ed25519": ed},
+            "type": event_type,
+            "content": content,
+        }
+        request_id = uuid4().hex
+        with self.store.transaction():
+            encrypted = self.sessions.encrypt(session, curve, canonical_json(payload))
+            body = {
+                "algorithm": OLM_ALGORITHM,
+                "sender_key": identity["curve25519"],
+                "ciphertext": {curve: encrypted},
+            }
+            request = {
+                "api": "send_to_device",
+                "body": {
+                    "event_type": "m.room.encrypted",
+                    "txn_id": request_id,
+                    "messages": {user_id: {device_id: body}},
+                },
+                "purpose": "",
+                "metadata": {},
+            }
+            self.store.put(f"outgoing/{request_id}", request)
+        async with self._outgoing_lock:
+            await self._execute(request_id, request)
 
     async def handle_to_device_event(self, raw: RawMatrixEvent) -> None:
-        """处理 to-device 事件。
+        async with self._lock:
+            await self._receive_to_device(raw)
 
-        主要处理以下类型:
-        - m.room.encrypted (Olm): 解密后递归处理内部事件
-        - m.room_key: 导入 Megolm 入站会话密钥
-        - m.forwarded_room_key: 转发来的 Megolm 会话密钥
-        - m.room_key_request: 密钥请求 (可选地重新发送密钥)
-        - m.room_key.withheld: 密钥被拒绝的通知
-        """
-        event_type = raw.type
-        content = raw.content
-        sender = str(raw.sender) if raw.sender else "unknown"
-
-        if raw.type.startswith("m.key.verification."):
-            await self.handle_verification_event(raw)
-            return
-
-        if event_type == "m.room.encrypted":
-            await self._handle_olm_encrypted_to_device(raw, sender)
-        elif event_type == "m.room_key":
-            await self._handle_room_key(content)
-        elif event_type == "m.forwarded_room_key":
-            await self._handle_forwarded_room_key(content)
-        elif event_type == "m.room_key_request":
-            await self._handle_key_request(sender, content)
-        elif event_type and event_type.startswith("m.room_key.withheld"):
-            log(
-                "WARNING",
-                f"密钥被拒绝来自 {sender}: "
-                f"room={content.get('room_id')}, "
-                f"reason={content.get('code')}",
+    async def _receive_to_device(self, raw: RawMatrixEvent) -> None:
+        sender, content = str(raw.sender or ""), raw.content
+        if raw.type == "m.room.encrypted":
+            if content.get("algorithm") != OLM_ALGORITHM:
+                raise DecryptionError("UnsupportedAlgorithm")
+            curve = self.account.account.identity_keys["curve25519"]
+            entry = content.get("ciphertext", {}).get(curve)
+            if entry is None:
+                return
+            plaintext = self.sessions.decrypt_to_device_message(
+                entry["body"], entry["type"], content["sender_key"]
             )
-        elif event_type and event_type.startswith("m.key"):
-            # 密钥验证消息 — 暂时忽略
-            log("TRACE", f"密钥验证消息来自 {sender}: {event_type}")
-
-    async def handle_verification_event(self, raw: RawMatrixEvent) -> bool:
-        """Process a room verification event when automatic SAS is enabled."""
-        if not raw.type.startswith("m.key.verification."):
-            return False
-        handled = await self._verification.handle(raw)
-        if (
-            handled
-            and raw.type == "m.key.verification.mac"
-            and raw.sender is not None
-        ):
-            transaction_id = raw.content.get("transaction_id")
-            state = self._verification._transactions.get(transaction_id)  # type: ignore[attr-defined]
-            if state is not None:
-                self._device_keys.mark_verified(str(raw.sender), state.sender_device)
-        return handled
-
-    async def _handle_room_key(self, content: dict[str, Any]) -> None:
-        """处理 m.room_key: 导入 Megolm 入站会话密钥。
-
-        m.room_key 负载结构:
-            algorithm: "m.megolm.v1.aes-sha2"
-            room_id: 房间 ID
-            session_id: 会话 ID
-            session_key: 导出的 session_key (base64)
-        """
-        algorithm = content.get("algorithm")
-        if algorithm != "m.megolm.v1.aes-sha2":
-            return
-
-        room_id = content.get("room_id")
-        session_id = content.get("session_id")
-        session_key = content.get("session_key")
-
-        if not (
-            isinstance(room_id, str)
-            and isinstance(session_id, str)
-            and isinstance(session_key, str)
-        ):
-            log("WARNING", f"m.room_key 缺少必要字段: {content}")
-            return
-
-        if self._megolm.add_inbound_session(room_id, session_id, session_key):
-            log("TRACE", f"已导入入站 Megolm 会话 {room_id}/{session_id}")
-
-    async def _handle_forwarded_room_key(self, content: dict[str, Any]) -> None:
-        """处理 m.forwarded_room_key: 转发来的 Megolm 会话密钥。
-
-        格式与 m.room_key 相同，但包含额外的转发链信息。
-        """
-        await self._handle_room_key(content)
-
-    async def _handle_key_request(self, sender: str, content: dict[str, Any]) -> None:
-        """处理 m.room_key_request: 其他设备请求我们共享密钥。
-
-        简单实现: 记录请求但不自动重新发送。
-        自动重新发送可能导致密钥共享循环。
-        """
-        room_id = content.get("room_id")
-        if room_id:
-            log(
-                "TRACE",
-                f"收到来自 {sender} 的密钥请求 (room={room_id})",
-            )
-
-    async def _handle_olm_encrypted_to_device(
-        self, raw: RawMatrixEvent, sender: str
-    ) -> None:
-        """解密 Olm 加密的 to-device 事件并递归处理内部事件。
-
-        现代 Matrix 客户端通过 Olm 加密 to-device 消息来安全地共享
-        Megolm 会话密钥。加密后的 to-device 事件类型为 m.room.encrypted，
-        algorithm 为 m.olm.v1.curve25519-aes-sha2。
-        """
-        content = raw.content
-        algorithm = content.get("algorithm")
-        if algorithm != "m.olm.v1.curve25519-aes-sha2":
-            return
-
-        ciphertext_map = content.get("ciphertext")
-        if not isinstance(ciphertext_map, dict):
-            log("WARNING", "Olm to-device 消息缺少有效的 ciphertext 字段")
-            return
-
-        my_curve25519 = self._account.account.identity_keys["curve25519"]
-        my_entry = ciphertext_map.get(my_curve25519)
-        if my_entry is None:
-            log(
-                "TRACE",
-                f"Olm to-device 消息不包含本设备的密钥 ({my_curve25519[:12]}...)，跳过",
-            )
-            return
-
-        if not isinstance(my_entry, dict):
-            return
-
-        body = my_entry.get("body")
-        msg_type = my_entry.get("type", 0)
-        if not isinstance(body, str):
-            return
-
-        sender_key = content.get("sender_key", "")
-        plaintext = self._sessions.decrypt_to_device_message(body, msg_type, sender_key)
-        if plaintext is None:
-            log("WARNING", f"Olm to-device 解密失败 (sender={sender})")
-            return
-
-        try:
             inner = json.loads(plaintext)
-        except json.JSONDecodeError:
-            log("WARNING", f"Olm to-device 解密后 JSON 解析失败 (sender={sender})")
+            identity = self.account.account.identity_keys
+            if (
+                inner.get("sender") != sender
+                or inner.get("recipient") != self.user_id
+                or inner.get("recipient_keys", {}).get("ed25519") != identity["ed25519"]
+            ):
+                raise DecryptionError("OlmEnvelopeMismatch")
+            device_id = inner.get("sender_device")
+            if device_id is None:
+                await self.devices.query(self, [sender])
+                for candidate, record in self.devices.get_device_keys_for_user(
+                    sender
+                ).items():
+                    if (
+                        record["keys"]["keys"].get(f"curve25519:{candidate}")
+                        == content["sender_key"]
+                    ):
+                        device_id = candidate
+                        break
+            device = self.devices.get_device_key(sender, device_id or "")
+            if device is None:
+                await self.devices.query(self, [sender])
+                device = self.devices.get_device_key(sender, device_id or "")
+            if (
+                not isinstance(device_id, str)
+                or not device
+                or device["keys"]["keys"].get(f"curve25519:{device_id}")
+                != content["sender_key"]
+                or device["keys"]["keys"].get(f"ed25519:{device_id}")
+                != inner.get("keys", {}).get("ed25519")
+            ):
+                raise DecryptionError("OlmSenderIdentityMismatch")
+            await self._receive_authenticated(
+                inner["type"],
+                inner["content"],
+                sender,
+                device_id,
+                content["sender_key"],
+                inner["keys"]["ed25519"],
+            )
+        elif raw.type.startswith("m.key.verification."):
+            await self.verifications.handle(raw)
+        elif raw.type == "m.room_key_request":
+            await self._key_request(sender, content)
+        elif raw.type == "m.secret.request":
+            await self._secret_request(sender, content)
+        elif raw.type == "m.room_key.withheld":
+            self.store.put(
+                f"withheld/{content.get('room_id')}/{content.get('session_id')}",
+                content,
+            )
+            await self.emit(
+                "decryption",
+                {
+                    "room_id": content.get("room_id"),
+                    "code": content.get("code"),
+                    "user_id": sender,
+                },
+            )
+        # Room keys and secrets are accepted only from authenticated Olm envelopes.
+
+    async def _receive_authenticated(
+        self,
+        event_type: str,
+        content: dict[str, Any],
+        sender: str,
+        device_id: str,
+        sender_key: str,
+        ed25519: str,
+    ) -> None:
+        if event_type in {"m.room_key", "m.forwarded_room_key"}:
+            value = dict(content)
+            forwarded = event_type == "m.forwarded_room_key"
+            if forwarded:
+                request = self.store.get(
+                    f"key_request/{content.get('room_id')}/{content.get('session_id')}"
+                )
+                if (
+                    sender != self.user_id
+                    or not self.devices.is_verified(sender, device_id)
+                    or not request
+                ):
+                    return
+                if content.get("sender_key") != request["sender_key"]:
+                    raise DecryptionError("ForwardedKeyMismatch")
+                value["sender_claimed_keys"] = {
+                    "ed25519": value.pop("sender_claimed_ed25519_key")
+                }
+                value["forwarding_curve25519_key_chain"] = [
+                    *value.get("forwarding_curve25519_key_chain", []),
+                    sender_key,
+                ]
+            else:
+                value.update(
+                    sender_key=sender_key,
+                    sender=sender,
+                    sender_claimed_keys={"ed25519": ed25519},
+                    forwarding_curve25519_key_chain=[],
+                )
+            self.megolm.import_key(value, exported=forwarded)
+            await self.retry_decryption()
+        elif event_type == "m.secret.send":
+            request = self.store.get(f"secret_request/{content.get('request_id')}")
+            if (
+                not request
+                or sender != self.user_id
+                or device_id not in request["devices"]
+                or not self.devices.is_verified(sender, device_id)
+            ):
+                return
+            await self.import_secret(request["name"], content["secret"])
+            self.store.delete(f"secret_request/{content['request_id']}")
+        elif event_type.startswith("m.key.verification."):
+            await self.verifications.handle(
+                RawMatrixEvent(type=event_type, sender=sender, content=content)
+            )
+
+    async def _key_request(self, sender: str, content: dict[str, Any]) -> None:
+        if content.get("action") != "request":
             return
-
-        inner_type = inner.get("type")
-        inner_content = inner.get("content", {})
-        if not isinstance(inner_type, str) or not isinstance(inner_content, dict):
+        device_id = content.get("requesting_device_id")
+        body = content.get("body", {})
+        if not isinstance(device_id, str) or body.get("algorithm") != MEGOLM_ALGORITHM:
             return
-
-        inner_raw = RawMatrixEvent(
-            type=inner_type,
-            content=inner_content,
-            sender=raw.sender,
-        )
-        await self.handle_to_device_event(inner_raw)
-
-    # ------------------------------------------------------------------
-    # 消息加密/解密
-    # ------------------------------------------------------------------
-
-    async def prepare_room_encryption(self, room_id: str) -> None:
-        """在首次向加密房间发送消息前共享当前 Megolm 会话密钥。"""
-        session_id = self._megolm.get_outbound_session_id(room_id)
-        if self._shared_outbound_sessions.get(room_id) == session_id:
+        # Historical keys are forwarded only to verified devices of our own
+        # user. Other users receive current keys through normal room sharing.
+        if sender != self.user_id or not self.devices.is_verified(sender, device_id):
             return
-
-        members_response = await self._adapter._api_get_room_members(  # type: ignore[union-attr]
-            self._bot,
-            room_id=room_id,
-            membership="join",
-        )
-        members = [
-            raw.state_key
-            for raw in members_response.chunk
-            if raw.type == "m.room.member"
-            and raw.state_key is not None
-            and raw.content.get("membership") == "join"
+        values = self.megolm.export_keys(body.get("room_id"), body.get("session_id"))
+        if not values or values[0]["sender_key"] != body.get("sender_key"):
+            return
+        value = values[0]
+        value["sender_claimed_ed25519_key"] = value.pop("sender_claimed_keys")[
+            "ed25519"
         ]
-        other_members = [uid for uid in members if uid != str(self._bot.user_id)]
-        if not other_members:
-            self._shared_outbound_sessions[room_id] = session_id
+        await self.send_encrypted_to_device(
+            sender, device_id, "m.forwarded_room_key", value
+        )
+
+    async def request_room_key(self, room_id: str, content: dict[str, Any]) -> None:
+        session_id = content.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
             return
-
-        self._device_keys.mark_for_query(other_members)
-        await self._device_keys.query_keys(self._adapter, self._bot)
-
-        shared_devices = await self._megolm.share_session_key(
-            self._adapter,
-            self._bot,
-            room_id,
-            self._bot.device_id or "",
-            other_members,
-        )
-        if shared_devices > 0:
-            self._shared_outbound_sessions[room_id] = session_id
-        else:
-            log("WARNING", f"房间 {room_id} 未能向任何设备共享 Megolm 密钥")
-
-    async def encrypt_room_message(
-        self, room_id: str, content: dict[str, Any]
-    ) -> dict[str, Any]:
-        """用 Megolm 加密房间消息内容。
-
-        Args:
-            room_id: 目标房间 ID
-            content: 明文消息内容 (Matrix 消息格式)
-
-        Returns:
-            m.room.encrypted 事件的内容字典
-        """
-        plaintext = json.dumps(
+        sender_key = content.get("sender_key")
+        if not isinstance(sender_key, str) or not sender_key:
+            return
+        name = f"key_request/{room_id}/{session_id}"
+        if self.store.get(name):
+            return
+        request_id = uuid4().hex
+        body = {
+            "room_id": room_id,
+            "algorithm": MEGOLM_ALGORITHM,
+            "session_id": session_id,
+            "sender_key": sender_key,
+        }
+        self.store.put(name, {**body, "request_id": request_id})
+        await self.send_to_device(
+            self.user_id,
+            "*",
+            "m.room_key_request",
             {
-                "type": "m.room.message",
-                "content": content,
-                "room_id": room_id,
+                "action": "request",
+                "request_id": request_id,
+                "requesting_device_id": self.device_id,
+                "body": body,
             },
-            ensure_ascii=False,
         )
-        encrypted = self._megolm.encrypt(room_id, plaintext)
-        # 填充 device_id
-        device_id = self._bot.device_id or ""
-        encrypted["device_id"] = device_id
-        return encrypted
+
+    async def request_secrets(self, device_id: str) -> None:
+        for name in SECRETS:
+            if self.store.get(f"secret/{name}"):
+                continue
+            request_id = uuid4().hex
+            self.store.put(
+                f"secret_request/{request_id}", {"name": name, "devices": [device_id]}
+            )
+            await self.send_to_device(
+                self.user_id,
+                device_id,
+                "m.secret.request",
+                {
+                    "action": "request",
+                    "name": name,
+                    "request_id": request_id,
+                    "requesting_device_id": self.device_id,
+                },
+            )
+
+    async def _secret_request(self, sender: str, content: dict[str, Any]) -> None:
+        device_id = content.get("requesting_device_id")
+        if (
+            content.get("action") != "request"
+            or sender != self.user_id
+            or not device_id
+            or not self.devices.is_verified(sender, device_id)
+            or content.get("name") not in SECRETS
+        ):
+            return
+        secret = self.store.get(f"secret/{content['name']}")
+        if secret:
+            await self.send_encrypted_to_device(
+                sender,
+                device_id,
+                "m.secret.send",
+                {"request_id": content["request_id"], "secret": secret},
+            )
+
+    async def import_secret(self, name: str, secret: str) -> None:
+        if name.startswith("m.cross_signing."):
+            await self.cross_signing.import_secret(name, secret)
+        elif name == "m.megolm_backup.v1":
+            await self.backups().enable(secret)
+            if (
+                self.bot.bot_info.backup_download_strategy
+                == BackupDownloadStrategy.ONE_SHOT
+            ):
+                await self.backups().download()
+        else:
+            raise ValueError("Unknown secret")
+        self.update_verification_state()
+
+    async def receive_sync(self, sync: Any) -> None:
+        async with self._lock:
+            await self.flush_requests()
+            if sync.device_lists:
+                changed = [str(uid) for uid in sync.device_lists.changed]
+                await self.devices.query(self, changed)
+                if changed or sync.device_lists.left:
+                    self.invalidate_outbound_sessions()
+                await self.cross_signing.refresh_trust()
+            if sync.to_device:
+                for raw in sync.to_device.events:
+                    try:
+                        await self._receive_to_device(raw)
+                    except (
+                        DecryptionError,
+                        CryptoError,
+                        ValueError,
+                        KeyError,
+                        olm.OlmGroupSessionError,
+                    ) as exc:
+                        log(
+                            "WARNING",
+                            f"Rejected Matrix to-device event: {type(exc).__name__}: {exc}",
+                        )
+            await self.account.replenish(
+                self,
+                sync.device_one_time_keys_count,
+                sync.device_unused_fallback_key_types,
+            )
+            await self.verifications.expire()
+            self.update_verification_state()
+        if await self.backups().are_enabled():
+            await self.backups().upload()
+
+    def update_verification_state(self) -> None:
+        identity = self.devices.identity(self.user_id)
+        verified = bool(
+            identity
+            and identity.get("verified")
+            and self.devices.is_cross_signed(self.user_id, self.device_id)
+        )
+        self._verification_state.set(
+            VerificationState.VERIFIED if verified else VerificationState.UNVERIFIED
+        )
+
+    def verification_state(self) -> Any:
+        return self._verification_state.changes()
+
+    def invalidate_outbound_sessions(self, room_id: str | None = None) -> None:
+        for name in self.store.names("outbound/"):
+            if room_id is None or name == f"outbound/{room_id}":
+                self.store.delete(name)
+
+    def mark_room_as_encrypted(
+        self, room_id: str, algorithm: str, **settings: Any
+    ) -> None:
+        self.store.put(f"room/{room_id}", {"algorithm": algorithm, **settings})
+
+    def is_room_encrypted(self, room_id: str) -> bool:
+        return bool(self.store.get(f"room/{room_id}"))
+
+    async def room_settings(self, room_id: str) -> dict[str, Any] | None:
+        settings = await self.bot._room_encryption_settings(room_id)
+        if settings:
+            if settings.get("algorithm") != MEGOLM_ALGORITHM:
+                raise CryptoError("Unsupported room encryption algorithm")
+            self.store.put(f"room/{room_id}", settings)
+        return settings
+
+    async def _share_room(
+        self, room_id: str, settings: dict[str, Any]
+    ) -> tuple[Any, dict[str, Any]]:
+        members = await self.call("get_room_members", room_id=room_id)
+        history = settings.get("history_visibility", "shared")
+        allowed = (
+            {"join", "invite"} if history in {"shared", "world_readable"} else {"join"}
+        )
+        users = sorted(
+            {
+                str(event.state_key)
+                for event in members.chunk
+                if event.state_key and event.content.get("membership") in allowed
+            }
+        )
+        await self.devices.query(self, users)
+        identity = {**self.account.account.identity_keys, "user_id": self.user_id}
+        session, record = self.megolm.outbound(room_id, settings, identity)
+        recipient_ids = [
+            f"{uid}|{did}"
+            for uid in users
+            for did in self.devices.get_device_keys_for_user(uid)
+        ]
+        if (
+            set(record["recipients"]) - set(recipient_ids)
+            or record["history_visibility"] != history
+        ):
+            self.megolm.discard(room_id)
+            session, record = self.megolm.outbound(room_id, settings, identity)
+        record["recipients"] = recipient_ids
+        strategy = CollectStrategy(self.bot.bot_info.encryption_sharing_strategy)
+        for uid in users:
+            for did, device in self.devices.get_device_keys_for_user(uid).items():
+                if (uid, did) == (self.user_id, self.device_id):
+                    continue
+                keys = device["keys"].get("keys", {})
+                curve = keys.get(f"curve25519:{did}")
+                if not curve:
+                    continue
+                recipient = f"{uid}|{did}|{curve}"
+                if recipient in record["shared"]:
+                    continue
+                trusted = self.devices.is_verified(uid, did)
+                cross_signed = self.devices.is_cross_signed(uid, did)
+                identity_record = self.devices.identity(uid)
+                blocked = device.get("local_trust") == LocalTrust.BLACKLISTED
+                if (
+                    strategy == CollectStrategy.ERROR_ON_VERIFIED_USER_PROBLEM
+                    and identity_record
+                    and (
+                        identity_record.get("violation")
+                        or (identity_record.get("verified") and not cross_signed)
+                    )
+                    and not blocked
+                    and device.get("local_trust")
+                    not in {LocalTrust.IGNORED, LocalTrust.VERIFIED}
+                ):
+                    raise CryptoError(
+                        "Verified user identity or device requires review"
+                    )
+                excluded = (
+                    blocked
+                    or (
+                        strategy == CollectStrategy.ONLY_TRUSTED_DEVICES and not trusted
+                    )
+                    or (strategy == CollectStrategy.IDENTITY_BASED and not cross_signed)
+                )
+                if excluded:
+                    await self.send_to_device(
+                        uid,
+                        did,
+                        "m.room_key.withheld",
+                        {
+                            "algorithm": MEGOLM_ALGORITHM,
+                            "room_id": room_id,
+                            "session_id": session.id,
+                            "sender_key": identity["curve25519"],
+                            "code": "m.blacklisted" if blocked else "m.unverified",
+                            "reason": "Device excluded by sharing policy",
+                        },
+                    )
+                    continue
+                await self.send_encrypted_to_device(
+                    uid,
+                    did,
+                    "m.room_key",
+                    {
+                        "algorithm": MEGOLM_ALGORITHM,
+                        "room_id": room_id,
+                        "session_id": session.id,
+                        "session_key": session.session_key,
+                    },
+                )
+                record["shared"][recipient] = session.message_index
+                self.megolm.save_outbound(room_id, session, record)
+        self.megolm.save_outbound(room_id, session, record)
+        return session, record
+
+    async def send_room_event(
+        self, room_id: str, event_type: str, content: dict[str, Any], txn_id: str
+    ) -> Any:
+        async with self._lock:
+            settings = await self.room_settings(room_id)
+            if settings and event_type != "m.room.encrypted":
+                if not self.ready:
+                    raise CryptoError("E2EE initialization has not completed")
+                await self.flush_requests()
+                session, record = await self._share_room(room_id, settings)
+                with self.store.transaction():
+                    ciphertext = session.encrypt(
+                        canonical_json(
+                            {"room_id": room_id, "type": event_type, "content": content}
+                        )
+                    )
+                    self.megolm.save_outbound(room_id, session, record)
+                    content = {
+                        "algorithm": MEGOLM_ALGORITHM,
+                        "session_id": session.id,
+                        "sender_key": self.account.account.identity_keys["curve25519"],
+                        "device_id": self.device_id,
+                        "ciphertext": ciphertext,
+                    }
+                    event_type = "m.room.encrypted"
+                    request_id = uuid4().hex
+                    request = {
+                        "api": "send_event",
+                        "body": {
+                            "room_id": room_id,
+                            "event_type": event_type,
+                            "content": content,
+                            "txn_id": txn_id,
+                        },
+                        "purpose": "",
+                        "metadata": {},
+                    }
+                    self.store.put(f"outgoing/{request_id}", request)
+                async with self._outgoing_lock:
+                    return await self._execute(request_id, request)
+            return await self.call(
+                "send_event",
+                room_id=room_id,
+                event_type=event_type,
+                content=content,
+                txn_id=txn_id,
+            )
 
     async def decrypt_room_event(
         self, raw: RawMatrixEvent, *, room_id: str
     ) -> RawMatrixEvent | None:
-        """解密 m.room.encrypted 事件，返回解密的 RawMatrixEvent。
-
-        Args:
-            raw: 原始的 m.room.encrypted 事件
-            room_id: 房间 ID
-
-        Returns:
-            解密后的 RawMatrixEvent (如同收到了明文 m.room.message)，
-            如果解密失败则返回 None
-        """
-        content = raw.content
-        algorithm = content.get("algorithm", "")
-
-        if algorithm == "m.megolm.v1.aes-sha2":
-            decrypted = self._decrypt_megolm(raw, room_id, content)
-            if decrypted is not None:
-                return decrypted
-            session_id = content.get("session_id")
-            credential = (
-                self._bot.bot_info.recovery_key or self._bot.bot_info.recovery_code
-            )
-            if isinstance(session_id, str) and credential:
-                try:
-                    restored = await self._recovery.recover_session_from_backup(
-                        self._adapter, self._bot, credential, room_id, session_id
-                    )
-                except Exception as exc:
-                    log("WARNING", f"按需恢复房间密钥失败: {type(exc).__name__}: {exc}")
-                    restored = False
-                if restored:
-                    return self._decrypt_megolm(raw, room_id, content)
-            elif (
-                isinstance(session_id, str)
-                and self._bot.bot_info.secret_storage_passphrase
-            ):
-                try:
-                    await self._recovery.recover_from_secret_storage(
-                        self._adapter,
-                        self._bot,
-                        self._bot.bot_info.secret_storage_passphrase,
-                    )
-                except Exception as exc:
-                    log(
-                        "WARNING",
-                        f"按需解锁 Secret Storage 失败: {type(exc).__name__}: {exc}",
-                    )
-                return self._decrypt_megolm(raw, room_id, content)
-            return None
-        if algorithm == "m.olm.v1.curve25519-aes-sha2":
-            # Olm 加密的房间事件——通常是设备间的密钥传输，
-            # 不包含用户消息，无需分派
-            log("TRACE", "收到 Olm 加密的房间事件，跳过分派")
-            return None
-        log("WARNING", f"未知加密算法: {algorithm}")
-        return None
-
-    def _decrypt_megolm(
-        self, raw: RawMatrixEvent, room_id: str, content: dict[str, Any]
-    ) -> RawMatrixEvent | None:
-        """解密 Megolm 加密的事件。
-
-        解密成功后，将明文的 JSON 内容解析为 RawMatrixEvent 返回。
-        原始事件的元数据 (event_id, sender, origin_server_ts) 得以保留。
-        """
-        session_id = content.get("session_id")
-        ciphertext = content.get("ciphertext")
-        sender_key = content.get("sender_key")
-
-        if not (
-            isinstance(session_id, str)
-            and isinstance(ciphertext, str)
-            and isinstance(sender_key, str)
-        ):
-            log("WARNING", f"Megolm 加密事件不完整: {content}")
-            return None
-
-        plaintext = self._megolm.decrypt(room_id, session_id, ciphertext)
-        if plaintext is None:
-            # 没有入站会话 → 可能还没收到密钥
-            log(
-                "TRACE",
-                f"无法解密 Megolm 消息 {room_id}/{session_id}（缺少入站会话）",
-            )
-            return None
-
-        # 解码解密后的 JSON 内容
-        decrypted_type = "m.room.message"
-        decrypted_content: dict[str, Any] = {
-            "body": plaintext,
-            "msgtype": "m.text",
-        }
         try:
-            decrypted_payload = json.loads(plaintext)
-        except json.JSONDecodeError:
-            pass
-        else:
-            if isinstance(decrypted_payload, dict):
-                payload_type = decrypted_payload.get("type")
-                if isinstance(payload_type, str):
-                    decrypted_type = payload_type
-                nested_content = decrypted_payload.get("content")
-                if isinstance(nested_content, dict):
-                    decrypted_content = dict(nested_content)
-                else:
-                    decrypted_content = dict(decrypted_payload)
-                    decrypted_content.pop("type", None)
+            value = self.megolm.decrypt(room_id, raw.model_dump())
+            return RawMatrixEvent.model_validate(value)
+        except DecryptionError as exc:
+            if exc.code == "MissingRoomKey":
+                event_id = str(raw.event_id or uuid4().hex)
+                self.store.put(
+                    f"undecrypted/{event_id}",
+                    {"room_id": room_id, "event": raw.model_dump(mode="json")},
+                )
+                await self.request_room_key(room_id, raw.content)
+                if (
+                    self.bot.bot_info.backup_download_strategy
+                    == BackupDownloadStrategy.AFTER_DECRYPTION_FAILURE
+                    and await self.backups().are_enabled()
+                ):
+                    await self.backups().download_room_key(
+                        room_id, raw.content["session_id"]
+                    )
+                    try:
+                        return RawMatrixEvent.model_validate(
+                            self.megolm.decrypt(room_id, raw.model_dump())
+                        )
+                    except DecryptionError:
+                        pass
+            await self.emit(
+                "decryption",
+                {"room_id": room_id, "event_id": raw.event_id, "code": exc.code},
+            )
+            return None
 
-        # 构建解密的 RawMatrixEvent，保留原始元数据
-        return RawMatrixEvent(
-            type=decrypted_type,
-            content=decrypted_content,
-            event_id=raw.event_id,
-            sender=raw.sender,
-            room_id=raw.room_id,
-            origin_server_ts=raw.origin_server_ts,
-            unsigned=raw.unsigned,
+    async def retry_decryption(self) -> None:
+        for name in self.store.names("undecrypted/"):
+            pending = self.store.get(name)
+            try:
+                self.megolm.decrypt(pending["room_id"], pending["event"])
+            except DecryptionError:
+                continue
+            raw = RawMatrixEvent.model_validate(pending["event"])
+            self.store.delete(name)
+            task = asyncio.create_task(
+                self.adapter._dispatch_room_event(
+                    self.bot, raw, room_id=pending["room_id"]
+                )
+            )
+            self._tasks.add(task)
+            task.add_done_callback(self._event_done)
+
+    async def handle_verification_event(
+        self, raw: RawMatrixEvent, room_id: str | None = None
+    ) -> bool:
+        async with self._lock:
+            return await self.verifications.handle(raw, room_id)
+
+    def is_sender_trusted(self, record: dict[str, Any]) -> bool:
+        for did, device in self.devices.get_device_keys_for_user(
+            record.get("sender", "")
+        ).items():
+            if device["keys"]["keys"].get(f"curve25519:{did}") == record["sender_key"]:
+                return self.devices.is_verified(record["sender"], did)
+        return False
+
+    async def account_data(self, event_type: str) -> dict[str, Any] | None:
+        try:
+            return await self.call("get_account_data", event_type=event_type)
+        except ActionFailed as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+
+    def secret_storage(self) -> SecretStorage:
+        return SecretStorage(self)
+
+    def backups(self) -> Backups:
+        return self._backups
+
+    def recovery(self) -> Recovery:
+        return self._recovery
+
+    async def get_device(self, user_id: str, device_id: str) -> Device | None:
+        await self.devices.query(self, [user_id])
+        return (
+            Device(self, user_id, device_id)
+            if self.devices.get_device_key(user_id, device_id)
+            else None
         )
+
+    async def get_own_device(self) -> Device | None:
+        return await self.get_device(self.user_id, self.device_id)
+
+    async def get_user_devices(self, user_id: str) -> UserDevices:
+        await self.devices.query(self, [user_id])
+        return UserDevices(self, user_id)
+
+    async def get_user_identity(self, user_id: str) -> UserIdentity | None:
+        await self.devices.query(self, [user_id])
+        return UserIdentity(self, user_id) if self.devices.identity(user_id) else None
+
+    async def get_verification_request(self, user_id: str, flow_id: str) -> Any:
+        return self.verifications.requests.get((user_id, flow_id))
+
+    async def get_verification(self, user_id: str, flow_id: str) -> Any:
+        request = await self.get_verification_request(user_id, flow_id)
+        return request.verification if request else None
+
+    async def bootstrap_cross_signing(
+        self, auth_data: dict[str, Any] | None = None
+    ) -> None:
+        await self.cross_signing.bootstrap(auth_data)
+
+    async def cross_signing_status(self) -> dict[str, bool]:
+        return self.cross_signing.status()
+
+    async def export_room_keys(self, passphrase: str) -> str:
+        return export_room_keys(self.megolm.export_keys(), passphrase)
+
+    async def import_room_keys(self, exported: str, passphrase: str) -> int:
+        count = 0
+        with self.store.transaction():
+            for value in import_room_keys(exported, passphrase):
+                count += self.megolm.import_key(value)
+        await self.retry_decryption()
+        return count
+
+    async def download_encrypted_file(self, descriptor: dict[str, Any]) -> bytes:
+        uri = descriptor["url"]
+        if not uri.startswith("mxc://") or "/" not in uri[6:]:
+            raise ValueError("Invalid encrypted attachment URI")
+        server, media_id = uri[6:].split("/", 1)
+        response = await self.call(
+            "download_media", server_name=server, media_id=media_id
+        )
+        if not isinstance(response, bytes):
+            raise CryptoError("Encrypted media download returned non-binary content")
+        return decrypt_attachment(response, descriptor)
+
+
+Encryption = CryptoEngine
+__all__ = ("CryptoEngine", "Encryption")

@@ -37,6 +37,18 @@ class BotInfo(BaseModel):
     auto_accept_blacklist: list[str] = Field(default_factory=list)
 
     # E2EE configuration
+    e2ee_enabled: bool = True
+    auto_enable_cross_signing: bool = False
+    auto_enable_backups: bool = False
+    backup_download_strategy: Literal["Manual", "OneShot", "AfterDecryptionFailure"] = (
+        "Manual"
+    )
+    encryption_sharing_strategy: Literal[
+        "AllDevices",
+        "ErrorOnVerifiedUserProblem",
+        "IdentityBasedStrategy",
+        "OnlyTrustedDevices",
+    ] = "AllDevices"
     recovery_key: str | None = None
     # Matrix recovery key. ``recovery_code`` remains a deprecated alias.
     # Deprecated compatibility alias; prefer ``recovery_key``.

@@ -198,9 +198,14 @@ def event_from_raw(
 
 
 __all__ = (
+    "AuthenticationEvent",
+    "BackupEvent",
+    "CryptoEvent",
+    "DecryptionFailureEvent",
     "EncryptedRoomEvent",
     "Event",
     "EventType",
+    "IdentityEvent",
     "InviteEvent",
     "LeaveEvent",
     "MessageEvent",
@@ -208,12 +213,54 @@ __all__ = (
     "NoticeEvent",
     "ReactionEvent",
     "ReceiptEvent",
+    "RecoveryEvent",
     "RedactionEvent",
     "RoomMemberEvent",
     "RoomMessageEvent",
     "SyncMetaEvent",
     "TypingEvent",
     "UnknownRoomEvent",
+    "VerificationEvent",
     "event_classes",
     "event_from_raw",
 )
+
+
+class CryptoEvent(NoticeEvent):
+    """E2EE state notification. The handle exposes explicit user actions."""
+
+    handle: Any = Field(default=None, exclude=True, repr=False)
+
+
+class VerificationEvent(CryptoEvent):
+    pass
+
+
+class IdentityEvent(CryptoEvent):
+    pass
+
+
+class DecryptionFailureEvent(CryptoEvent):
+    pass
+
+
+class BackupEvent(CryptoEvent):
+    pass
+
+
+class RecoveryEvent(CryptoEvent):
+    pass
+
+
+class AuthenticationEvent(CryptoEvent):
+    pass
+
+
+CRYPTO_EVENT_CLASSES = {
+    "verification": VerificationEvent,
+    "identity": IdentityEvent,
+    "decryption": DecryptionFailureEvent,
+    "backup": BackupEvent,
+    "recovery": RecoveryEvent,
+    "authentication": AuthenticationEvent,
+}

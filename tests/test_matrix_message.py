@@ -43,6 +43,7 @@ def test_convert_message_from_api_json() -> None:
 @pytest.mark.asyncio
 async def test_text_and_mention_build_matrix_content(dummy_bot: DummyBot) -> None:
     dummy_bot.adapter.content = b'{"event_id":"$sent:example.org"}'
+    dummy_bot.adapter.responses = [(200, b"[]")]
     message = Message(
         [
             MessageSegment.text("hi "),

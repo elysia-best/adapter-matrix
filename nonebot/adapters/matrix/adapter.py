@@ -173,7 +173,7 @@ class Adapter(BaseAdapter, HandleMixin):
         log("ERROR", f"Matrix token store {path} is not a JSON object")
         return {}
 
-    def _load_persisted_tokens(self, bot_info: BotInfo) -> None:  # noqa: C901
+    def _load_persisted_tokens(self, bot_info: BotInfo) -> None:
         key = self._bot_store_key(bot_info)
         if key is None:
             return
@@ -743,21 +743,9 @@ class Adapter(BaseAdapter, HandleMixin):
                 self_info = await self._bootstrap_bot(bot_info)
                 bot = Bot(self, str(self_info.user_id), bot_info, self_info)
 
-                # 初始化 E2EE 加密引擎 (如果配置了存储路径)
-                if (
-                    bot_info.e2ee_store_path
-                    or self.matrix_config.matrix_token_store_path
-                ):
-                    try:
-                        bot.crypto = CryptoEngine(bot, self)
-                        await bot.crypto.initialize()
-                    except Exception as e:
-                        log(
-                            "WARNING",
-                            f"E2EE 加密引擎初始化失败，将以明文模式运行: "
-                            f"{type(e).__name__}: {e}",
-                        )
-                        bot.crypto = None
+                if bot_info.e2ee_enabled:
+                    bot.crypto = CryptoEngine(bot, self)
+                    await bot.crypto.initialize()
 
                 self.bot_connect(bot)
                 log("INFO", f"Matrix bot {escape_tag(bot.self_id)} connected")
@@ -774,6 +762,8 @@ class Adapter(BaseAdapter, HandleMixin):
             finally:
                 if bot and bot.self_id in self.bots:
                     self.bot_disconnect(bot)
+                if bot and bot.crypto is not None:
+                    await bot.crypto.close()
 
     async def _bootstrap_bot(self, bot_info: BotInfo) -> WhoamiResponse:
         # The adapter runs with configured tokens; whoami validates the token and
@@ -838,6 +828,18 @@ class Adapter(BaseAdapter, HandleMixin):
                 await asyncio.sleep(self.matrix_config.matrix_retry_interval)
 
     async def _handle_sync(self, bot: Bot, sync: SyncResponse) -> None:
+        for membership, rooms in (
+            ("join", sync.rooms.join),
+            ("invite", sync.rooms.invite),
+            ("leave", sync.rooms.leave),
+        ):
+            for room_id, room in rooms.items():
+                bot._rooms[str(room_id)] = membership
+                if isinstance(room, InvitedRoomSync):
+                    events = room.invite_state.events
+                else:
+                    events = [*room.state.events, *room.timeline.events]
+                self._update_room_state(bot, str(room_id), events)
         await self._handle_e2ee_sync_data(bot, sync)
         self._update_direct_rooms(bot, sync.account_data.events)
         for room_id, room in sync.rooms.join.items():
@@ -854,29 +856,24 @@ class Adapter(BaseAdapter, HandleMixin):
     async def _handle_e2ee_sync_data(self, bot: Bot, sync: SyncResponse) -> None:
         """Process device_lists and to_device events for E2EE."""
         if bot.crypto is not None:
-            bot.crypto.receive_sync_changes(
-                changed=[
-                    str(u)
-                    for u in (sync.device_lists.changed if sync.device_lists else [])
-                ],
-                left=[
-                    str(u)
-                    for u in (sync.device_lists.left if sync.device_lists else [])
-                ],
-                to_device_events=sync.to_device.events
-                if sync.to_device is not None
-                else [],
-                next_batch=sync.next_batch,
-                one_time_key_counts=sync.device_one_time_keys_count,
-            )
-        if sync.device_lists is not None and bot.crypto is not None:
-            await bot.crypto.handle_device_lists(
-                changed=[str(u) for u in sync.device_lists.changed],
-                left=[str(u) for u in sync.device_lists.left],
-            )
+            await bot.crypto.receive_sync(sync)
 
-        if sync.to_device is not None and bot.crypto is not None:
-            await self._handle_to_device_events(bot, sync.to_device.events)
+    def _update_room_state(
+        self, bot: Bot, room_id: str, events: list[RawMatrixEvent]
+    ) -> None:
+        for raw in events:
+            if raw.type == "m.room.encryption" and raw.state_key == "":
+                bot._encryption_states[room_id] = dict(raw.content)
+                if bot.crypto is not None:
+                    bot.crypto.mark_room_as_encrypted(room_id, **raw.content)
+            elif raw.type == "m.room.history_visibility" and raw.state_key == "":
+                bot._history_visibility[room_id] = raw.content.get(
+                    "history_visibility", "shared"
+                )
+                if bot.crypto is not None:
+                    bot.crypto.invalidate_outbound_sessions(room_id)
+            elif raw.type == "m.room.member" and bot.crypto is not None:
+                bot.crypto.invalidate_outbound_sessions(room_id)
 
     async def _handle_to_device_events(
         self, bot: Bot, events: list[RawMatrixEvent]
@@ -903,9 +900,6 @@ class Adapter(BaseAdapter, HandleMixin):
     ) -> None:
         """Process events for a joined room, including E2EE state detection."""
         for raw in room.state.events:
-            if raw.type == "m.room.encryption" and bot.crypto is not None:
-                algorithm = raw.content.get("algorithm", "m.megolm.v1.aes-sha2")
-                bot.crypto.mark_room_as_encrypted(str(room_id), algorithm)
             await self._dispatch_room_event(bot, raw, room_id=str(room_id))
         for raw in room.timeline.events:
             await self._dispatch_room_event(bot, raw, room_id=str(room_id))
@@ -984,17 +978,16 @@ class Adapter(BaseAdapter, HandleMixin):
         if self._is_old_event(bot, raw):
             return
 
-        if (
-            raw.type.startswith("m.key.verification.")
-            and bot.crypto is not None
-            and await bot.crypto.handle_verification_event(raw)
-        ):
+        if raw.event_id and str(raw.event_id) in bot._dispatched_events:
             return
 
         log("TRACE", f"Dispatching event {raw.event_id or raw.type} in room {room_id}")
 
         # 解密 m.room.encrypted 事件
-        if raw.type == "m.room.encrypted" and bot.crypto is not None:
+        if raw.type == "m.room.encrypted":
+            if bot.crypto is None:
+                log("WARNING", f"Cannot decrypt event in {room_id}: E2EE is disabled")
+                return
             try:
                 decrypted = await bot.crypto.decrypt_room_event(raw, room_id=room_id)
                 if decrypted is not None:
@@ -1008,6 +1001,14 @@ class Adapter(BaseAdapter, HandleMixin):
                     f"解密房间事件失败 ({room_id}): {type(e).__name__}: {e}",
                 )
                 return
+
+        if bot.crypto is not None and await bot.crypto.handle_verification_event(
+            raw, room_id
+        ):
+            return
+
+        if raw.event_id:
+            bot._dispatched_events.add(str(raw.event_id))
 
         if (
             raw.sender == bot.user_id

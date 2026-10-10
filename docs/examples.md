@@ -205,6 +205,64 @@ async def handle_secret(bot: Bot, event: MessageEvent):
     # 同理，收到的加密消息也会自动解密为明文后传入 event
 ```
 
+## 处理设备验证
+
+验证请求和状态会以带有 `handle` 的类型化事件分派。自动接受配置只会调用
+`VerificationRequest.accept()`，不会替用户确认 SAS 或二维码；确认动作应由插件在
+展示比较结果并获得用户明确操作后调用。
+
+```python
+from nonebot import on_command, on_type
+from nonebot.adapters.matrix import (
+    Bot,
+    QrVerification,
+    SasVerification,
+    VerificationEvent,
+    VerificationRequest,
+)
+
+verification_events = on_type(VerificationEvent, block=False)
+confirm = on_command("verify-confirm")
+pending: dict[tuple[str, str], SasVerification | QrVerification] = {}
+
+
+@verification_events.handle()
+async def show_verification(event: VerificationEvent):
+    handle = event.handle
+    if isinstance(handle, VerificationRequest):
+        if handle.is_ready():
+            # 交给插件 UI 展示可用方式；这里仅启动 SAS，不自动确认。
+            sas = await handle.start_sas()
+            if sas is not None:
+                pending[handle.other_user_id, handle.flow_id] = sas
+                print(sas.decimals(), sas.emoji())
+    elif isinstance(handle, SasVerification) and handle.can_be_presented():
+        pending[handle.request.other_user_id, handle.request.flow_id] = handle
+        print(handle.decimals(), handle.emoji())
+
+
+@confirm.handle()
+async def confirm_verification(bot: Bot, event):
+    # 生产插件应把确认动作接到自己的按钮、Web UI 或命令权限上。
+    for verification in pending.values():
+        if isinstance(verification, SasVerification):
+            await verification.confirm()
+            break
+```
+
+二维码由插件负责展示或扫码，适配器只提供标准 Matrix 字节编码：
+
+```python
+qr = await request.generate_qr_code()
+if qr is not None:
+    image_bytes = qr.to_bytes()  # 交给二维码 UI 展示
+
+# 扫描后的原始二维码字节交回对应请求；不会自动确认信任。
+qr = await request.scan_qr_code(scanned_bytes)
+if qr is not None:
+    await qr.confirm()
+```
+
 ## 组合消息段
 
 `Message` 支持 `+` 运算符拼接多个 `MessageSegment`：

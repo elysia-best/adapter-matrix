@@ -1,9 +1,16 @@
 from .adapter import Adapter
 from .api import UNSET, is_not_unset, is_unset
 from .bot import Bot
+from .crypto.identities import Device, UserDevices, UserIdentity
+from .crypto.verification import QrVerification, SasVerification, VerificationRequest
 from .event import (
+    AuthenticationEvent,
+    BackupEvent,
+    CryptoEvent,
+    DecryptionFailureEvent,
     Event,
     EventType,
+    IdentityEvent,
     InviteEvent,
     LeaveEvent,
     MessageEvent,
@@ -11,23 +18,32 @@ from .event import (
     NoticeEvent,
     ReactionEvent,
     ReceiptEvent,
+    RecoveryEvent,
     RedactionEvent,
     RoomMemberEvent,
     RoomMessageEvent,
     SyncMetaEvent,
     TypingEvent,
     UnknownRoomEvent,
+    VerificationEvent,
     event_classes,
 )
 from .message import Message, MessageSegment
+from .room import Room
 from .utils import log
 
 __all__ = (
     "UNSET",
     "Adapter",
+    "AuthenticationEvent",
+    "BackupEvent",
     "Bot",
+    "CryptoEvent",
+    "DecryptionFailureEvent",
+    "Device",
     "Event",
     "EventType",
+    "IdentityEvent",
     "InviteEvent",
     "LeaveEvent",
     "Message",
@@ -35,14 +51,22 @@ __all__ = (
     "MessageSegment",
     "MetaEvent",
     "NoticeEvent",
+    "QrVerification",
     "ReactionEvent",
     "ReceiptEvent",
+    "RecoveryEvent",
     "RedactionEvent",
+    "Room",
     "RoomMemberEvent",
     "RoomMessageEvent",
+    "SasVerification",
     "SyncMetaEvent",
     "TypingEvent",
     "UnknownRoomEvent",
+    "UserDevices",
+    "UserIdentity",
+    "VerificationEvent",
+    "VerificationRequest",
     "event_classes",
     "is_not_unset",
     "is_unset",

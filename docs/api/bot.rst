@@ -16,6 +16,8 @@ Bot 是 Matrix 适配器的核心类，继承自 NoneBot 的 ``Bot`` 基类和 A
 
 房间操作
    - :meth:`Bot.join_room` — 加入房间。
+   - :meth:`Bot.get_room` — 获取已同步房间的 SDK facade；未知房间返回 ``None``。
+   - :meth:`Bot.encryption` — 获取 E2EE engine，访问设备、验证、恢复和备份对象。
    - :meth:`Bot.react` — 发送消息反应（m.reaction）。
    - :meth:`Bot.redact` — 撤回消息。
    - :meth:`Bot.set_typing_state` — 设置输入状态。
@@ -48,6 +50,16 @@ Bot 是 Matrix 适配器的核心类，继承自 NoneBot 的 ``Bot`` 基类和 A
 
    返回：
      ``EventIdResponse`` -- 包含已发送事件的 ``event_id``。
+
+.. automethod:: Bot.get_room
+
+   返回已同步的 ``Room`` 对象。房间对象提供 ``enable_encryption``、``send``、
+   ``send_attachment``、``decrypt_event`` 和 ``discard_room_key``。
+
+.. automethod:: Bot.encryption
+
+   返回 ``CryptoEngine``。E2EE 初始化失败或显式关闭时会抛出 ``CryptoError``，
+   不会自动降级为明文。
 
 .. automethod:: Bot.send_to
 

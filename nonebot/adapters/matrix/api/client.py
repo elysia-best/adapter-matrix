@@ -112,3 +112,21 @@ class ApiClient:
 
     async def get_account_data(self, **data: Any) -> Any:
         return await self._matrix_call("get_account_data", **data)
+
+    async def keys_device_signing_upload(self, **data: Any) -> Any:
+        return await self._matrix_call("keys_device_signing_upload", **data)
+
+    async def keys_signatures_upload(self, **data: Any) -> Any:
+        return await self._matrix_call("keys_signatures_upload", **data)
+
+    async def set_account_data(self, **data: Any) -> None:
+        await self._matrix_call("set_account_data", **data)
+
+    async def room_keys_create_version(self, **data: Any) -> Any:
+        return await self._matrix_call("room_keys_create_version", **data)
+
+    async def room_keys_delete_version(self, **data: Any) -> None:
+        await self._matrix_call("room_keys_delete_version", **data)
+
+    async def room_keys_put_keys(self, **data: Any) -> Any:
+        return await self._matrix_call("room_keys_put_keys", **data)

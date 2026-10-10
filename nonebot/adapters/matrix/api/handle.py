@@ -7,7 +7,6 @@ from urllib.parse import quote
 
 from nonebot.compat import type_validate_python
 from nonebot.drivers import Request, Response
-from nonebot.utils import escape_tag
 from yarl import URL
 
 from .model import (
@@ -36,6 +35,7 @@ from .utils import filter_query, filter_unset_query
 from ..config import BotInfo, Config
 from ..exception import (
     ActionFailed,
+    InteractiveAuthRequired,
     RateLimitException,
     UnauthorizedException,
 )
@@ -74,10 +74,7 @@ async def _request(
     request.timeout = adapter.matrix_config.matrix_api_timeout
     request.proxy = adapter.matrix_config.matrix_proxy
     data = await adapter.request(request)
-    log(
-        "TRACE",
-        f"API code: {data.status_code} response: {escape_tag(str(data.content))}",
-    )
+    log("TRACE", f"Matrix API status: {data.status_code}")
     if HTTPStatus.OK <= data.status_code < HTTPStatus.MULTIPLE_CHOICES:
         if not data.content:
             raise ActionFailed(data)
@@ -85,6 +82,15 @@ async def _request(
             return data.content
         return json.loads(data.content)
     if data.status_code in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
+        error = ActionFailed(data)
+        challenge = error.body or {}
+        if (
+            "flows" in challenge
+            or "session" in challenge
+            or "org.matrix.cross_signing_reset" in challenge
+            or "org.matrix.msc4312" in challenge
+        ):
+            raise InteractiveAuthRequired(data)
         raise UnauthorizedException(data)
     if data.status_code == HTTPStatus.TOO_MANY_REQUESTS:
         raise RateLimitException(data)
@@ -960,3 +966,107 @@ class HandleMixin:
                 params=params,
             ),
         )
+
+    async def _api_keys_device_signing_upload(
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        master_key: dict[str, Any],
+        self_signing_key: dict[str, Any],
+        user_signing_key: dict[str, Any],
+        auth: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        body = {
+            "master_key": master_key,
+            "self_signing_key": self_signing_key,
+            "user_signing_key": user_signing_key,
+        }
+        if auth is not None:
+            body["auth"] = auth
+        return await _request(
+            self,
+            bot.bot_info,
+            _json_request(
+                method="POST",
+                url=self.client_url(bot.bot_info, "/keys/device_signing/upload"),
+                headers=_headers(self, bot.bot_info),
+                body=body,
+            ),
+        )
+
+    async def _api_keys_signatures_upload(
+        self: AdapterProtocol, bot: Bot, *, signatures: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await _request(
+            self,
+            bot.bot_info,
+            _json_request(
+                method="POST",
+                url=self.client_url(bot.bot_info, "/keys/signatures/upload"),
+                headers=_headers(self, bot.bot_info),
+                body=signatures,
+            ),
+        )
+
+    async def _api_set_account_data(
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        event_type: str,
+        content: dict[str, Any],
+        user_id: str | None = None,
+    ) -> None:
+        owner = quote_path(user_id or str(bot.user_id))
+        await _request(
+            self,
+            bot.bot_info,
+            _json_request(
+                method="PUT",
+                url=self.client_url(
+                    bot.bot_info, f"/user/{owner}/account_data/{quote_path(event_type)}"
+                ),
+                headers=_headers(self, bot.bot_info),
+                body=content,
+            ),
+        )
+
+    async def _api_room_keys_create_version(
+        self: AdapterProtocol, bot: Bot, *, algorithm: str, auth_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await _request(
+            self,
+            bot.bot_info,
+            _json_request(
+                method="POST",
+                url=self.client_url(bot.bot_info, "/room_keys/version"),
+                headers=_headers(self, bot.bot_info),
+                body={"algorithm": algorithm, "auth_data": auth_data},
+            ),
+        )
+
+    async def _api_room_keys_delete_version(
+        self: AdapterProtocol, bot: Bot, *, version: str
+    ) -> None:
+        await _request(
+            self,
+            bot.bot_info,
+            Request(
+                "DELETE",
+                self.client_url(
+                    bot.bot_info, f"/room_keys/version/{quote_path(version)}"
+                ),
+                headers=_headers(self, bot.bot_info),
+            ),
+        )
+
+    async def _api_room_keys_put_keys(
+        self: AdapterProtocol, bot: Bot, *, version: str, rooms: dict[str, Any]
+    ) -> dict[str, Any]:
+        request = _json_request(
+            method="PUT",
+            url=self.client_url(bot.bot_info, "/room_keys/keys"),
+            headers=_headers(self, bot.bot_info),
+            params={"version": version},
+            body={"rooms": rooms},
+        )
+        return await _request(self, bot.bot_info, request)

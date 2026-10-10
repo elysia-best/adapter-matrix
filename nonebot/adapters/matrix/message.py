@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from typing_extensions import Self, override
 
 from nonebot.adapters import (
@@ -39,6 +39,10 @@ class MediaUploader(Protocol):
         filename: str | None = None,
         content_type: str | None = None,
     ) -> UploadResponse: ...
+
+
+class EncryptedMediaUploader(MediaUploader, Protocol):
+    async def upload_encrypted_media(self, content: bytes) -> dict[str, Any]: ...
 
 
 class MessageSegment(BaseMessageSegment["Message"]):
@@ -401,6 +405,22 @@ async def _materialize_media_content(
     if bot is None:
         msg = "media segments with bytes require a bot to upload content"
         raise ValueError(msg)
+    if getattr(bot, "encrypted", False) is True:
+        encrypted_bot = cast("EncryptedMediaUploader", bot)
+        content["file"] = await encrypted_bot.upload_encrypted_media(
+            segment.data["content"]
+        )
+        content.pop("url", None)
+        if content.get("info"):
+            info = dict(content["info"])
+            thumbnail = info.pop("thumbnail_bytes", None)
+            if thumbnail is not None:
+                info["thumbnail_file"] = await encrypted_bot.upload_encrypted_media(
+                    thumbnail
+                )
+                info.pop("thumbnail_url", None)
+            content["info"] = info
+        return content
     # Matrix media is uploaded separately and then referenced via mxc://.
     uploaded = await bot.upload_media(
         segment.data["content"],
@@ -442,13 +462,10 @@ def message_from_content(content: dict[str, Any]) -> Message:
     if msgtype in {"m.image", "m.file", "m.audio", "m.video"}:
         segment_type = MSGTYPE_SEGMENT_MAP[msgtype]
         factory = getattr(MessageSegment, segment_type)
-        return Message(
-            factory(
-                content.get("url", ""),
-                body=body,
-                info=content.get("info"),
-            )
-        )
+        segment = factory(content.get("url", ""), body=body, info=content.get("info"))
+        if isinstance(content.get("file"), dict):
+            segment.data["file"] = dict(content["file"])
+        return Message(segment)
     if body:
         return Message(MessageSegment.text(unescape(body)))
     return Message(MessageSegment.raw(content))

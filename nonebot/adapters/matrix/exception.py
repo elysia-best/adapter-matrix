@@ -63,6 +63,10 @@ class ActionFailed(BaseActionFailed, MatrixAdapterException):
         self.soft_logout: bool = body.get("soft_logout", False)
 
 
+class InteractiveAuthRequired(ActionFailed):
+    """A resumable UIA or OAuth authorization challenge, not token expiry."""
+
+
 class UnauthorizedException(ActionFailed):
     pass
 

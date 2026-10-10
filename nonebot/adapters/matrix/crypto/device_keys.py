@@ -1,160 +1,156 @@
-"""DeviceKeyStore — 设备密钥缓存和查询。
-
-缓存其他用户的设备密钥信息，并通过 /keys/query 和 /keys/claim API
-获取和更新密钥。当服务端通知设备列表变更时，自动查询新设备的密钥。
-"""
+"""Validated device keys and distinct local/cross-signing trust."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from .primitives import verify_device_signature
+from .primitives import OLM_ALGORITHM, verify_json
 from .store import CryptoStore
-from ..serialization import encode_matrix_canonical_json
-from ..utils import log
+from .types import CryptoError, LocalTrust
 
-if TYPE_CHECKING:
-    from ..adapter import Adapter
-    from ..bot import Bot
+
+def signing_key(value: dict[str, Any], user_id: str, usage: str) -> str:
+    keys = value.get("keys", {})
+    if (
+        value.get("user_id") != user_id
+        or value.get("usage") != [usage]
+        or len(keys) != 1
+    ):
+        raise CryptoError("Invalid cross-signing key")
+    key_id, public = next(iter(keys.items()))
+    if key_id != f"ed25519:{public}":
+        raise CryptoError("Cross-signing key ID mismatch")
+    return public
 
 
 class DeviceKeyStore:
-    """缓存和维护 Matrix 设备密钥信息。
-
-    密钥缓存结构:
-        {user_id: {device_id: {keys, algorithms, signatures, ...}}}
-
-    同时维护一个待查询用户队列，在下一轮同步中批量查询。
-    """
-
     def __init__(self, store: CryptoStore) -> None:
-        self._store = store
-        self._keys: dict[str, dict[str, dict[str, Any]]] = {}
-        self._pending_query: set[str] = set()
-
-    def load(self) -> None:
-        """从持久化存储加载设备密钥缓存。"""
-        self._keys = self._store.load_device_keys()
-        log("TRACE", f"已加载 {sum(len(d) for d in self._keys.values())} 个设备密钥")
-
-    def _save(self) -> None:
-        self._store.save_device_keys(self._keys)
-
-    def mark_for_query(self, user_ids: list[str]) -> None:
-        """标记用户 ID 列表，在下次同步时查询其设备密钥。"""
-        self._pending_query.update(user_ids)
-
-    def mark_left(self, user_ids: list[str]) -> None:
-        """用户离开后清理其设备密钥缓存。"""
-        for uid in user_ids:
-            self._keys.pop(uid, None)
-        self._save()
-
-    def get_device_keys_for_user(self, user_id: str) -> dict[str, dict[str, Any]]:
-        """获取指定用户的所有已知设备密钥。"""
-        return self._keys.get(user_id, {})
+        self.store = store
 
     def get_device_key(self, user_id: str, device_id: str) -> dict[str, Any] | None:
-        """获取指定设备的密钥信息。"""
-        return self._keys.get(user_id, {}).get(device_id)
+        return self.store.get("devices", {}).get(user_id, {}).get(device_id)
 
-    def get_device_curve25519_key(self, user_id: str, device_id: str) -> str | None:
-        """获取指定设备的 Curve25519 身份密钥。"""
-        device = self.get_device_key(user_id, device_id)
-        if device is None:
-            return None
-        keys = device.get("keys", {})
-        return keys.get(f"curve25519:{device_id}")
+    def get_device_keys_for_user(self, user_id: str) -> dict[str, Any]:
+        return self.store.get("devices", {}).get(user_id, {})
 
-    def get_device_ed25519_key(self, user_id: str, device_id: str) -> str | None:
-        """获取指定设备的 Ed25519 签名密钥。"""
-        device = self.get_device_key(user_id, device_id)
-        if device is None:
-            return None
-        keys = device.get("keys", {})
-        return keys.get(f"ed25519:{device_id}")
+    def identity(self, user_id: str) -> dict[str, Any] | None:
+        return self.store.get("identities", {}).get(user_id)
 
-    def mark_verified(self, user_id: str, device_id: str) -> bool:
-        """Persist SAS verification for a known device."""
-        device = self.get_device_key(user_id, device_id)
-        if device is None:
+    def is_verified(self, user_id: str, device_id: str) -> bool:
+        record = self.get_device_key(user_id, device_id)
+        if not record or record.get("local_trust") == LocalTrust.BLACKLISTED:
             return False
-        device["verified"] = True
-        self._save()
-        return True
+        if record.get("local_trust") == LocalTrust.VERIFIED:
+            return True
+        identity = self.identity(user_id)
+        return bool(
+            identity
+            and identity.get("verified")
+            and self.is_cross_signed(user_id, device_id)
+        )
 
-    async def query_keys(self, adapter: Adapter, bot: Bot) -> None:
-        """批量查询待查询用户的设备密钥。
+    def is_cross_signed(self, user_id: str, device_id: str) -> bool:
+        record = self.get_device_key(user_id, device_id)
+        identity = self.identity(user_id)
+        if not record or not identity or not identity.get("self_signing"):
+            return False
+        public = signing_key(identity["self_signing"], user_id, "self_signing")
+        return verify_json(record["keys"], user_id, public, public)
 
-        调用 /keys/query API，获取所有设备的身份和签名密钥，
-        并更新本地缓存。
-        """
-        if not self._pending_query:
+    def set_trust(self, user_id: str, device_id: str, trust: LocalTrust) -> None:
+        devices = self.store.get("devices", {})
+        if device_id not in devices.get(user_id, {}):
+            raise CryptoError("Unknown device")
+        devices[user_id][device_id]["local_trust"] = trust.value
+        self.store.put("devices", devices)
+
+    async def query(self, engine: Any, users: list[str]) -> None:
+        if not users:
             return
+        result = await engine.call("keys_query", device_keys={uid: [] for uid in users})
+        devices = self.store.get("devices", {})
+        identities = self.store.get("identities", {})
+        changes = []
+        for user_id in users:
+            # A missing/failing homeserver response must not erase cached data.
+            if user_id not in result.get("device_keys", {}):
+                continue
+            old_devices = devices.get(user_id, {})
+            updated = {}
+            for device_id, keys in result["device_keys"][user_id].items():
+                if (
+                    not isinstance(keys, dict)
+                    or keys.get("user_id") != user_id
+                    or keys.get("device_id") != device_id
+                ):
+                    continue
+                public = keys.get("keys", {}).get(f"ed25519:{device_id}")
+                if not public or not verify_json(keys, user_id, device_id, public):
+                    continue
+                old = old_devices.get(device_id)
+                # Device IDs must not silently replace either identity key.
+                if old and old["keys"]["keys"] != keys["keys"]:
+                    changes.append(
+                        {"user_id": user_id, "device_id": device_id, "violation": True}
+                    )
+                    updated[device_id] = {
+                        **old,
+                        "local_trust": LocalTrust.BLACKLISTED.value,
+                    }
+                    continue
+                updated[device_id] = {
+                    "keys": keys,
+                    "local_trust": old.get("local_trust", LocalTrust.UNSET.value)
+                    if old
+                    else LocalTrust.UNSET.value,
+                }
+            devices[user_id] = updated
+            master = result.get("master_keys", {}).get(user_id)
+            if master:
+                public = signing_key(master, user_id, "master")
+                previous = identities.get(user_id, {})
+                same = previous.get("master", {}).get("keys") == master["keys"]
+                identity = {
+                    "master": master,
+                    "verified": same and previous.get("verified", False),
+                    "previously_verified": previous.get("previously_verified", False)
+                    or previous.get("verified", False),
+                    "violation": previous.get("violation", False)
+                    or (not same and previous.get("verified", False)),
+                }
+                for usage in ("self_signing", "user_signing"):
+                    key = result.get(f"{usage}_keys", {}).get(user_id)
+                    if key:
+                        signing_key(key, user_id, usage)
+                        if not verify_json(key, user_id, public, public):
+                            raise CryptoError("Invalid cross-signing signature")
+                        identity[usage] = key
+                identities[user_id] = identity
+                if not same:
+                    changes.append(
+                        {"user_id": user_id, "violation": identity["violation"]}
+                    )
+        with self.store.transaction():
+            self.store.put("devices", devices)
+            self.store.put("identities", identities)
+        for change in changes:
+            await engine.emit("identity", change)
 
-        user_ids = list(self._pending_query)
-        self._pending_query.clear()
-        log("TRACE", f"查询 {len(user_ids)} 个用户的设备密钥")
-
-        # batch: {user_id: []} 表示查询所有设备
-        batch = {uid: [] for uid in user_ids}
-        result = await adapter._api_keys_query(bot, device_keys=batch)  # type: ignore[union-attr]
-
-        for user_id, devices in result.get("device_keys", {}).items():
-            self._keys.setdefault(user_id, {})
-            for device_id, key_data in devices.items():
-                if key_data is None:
-                    # 设备已删除
-                    self._keys[user_id].pop(device_id, None)
-                else:
-                    stored_key_data: dict[str, Any] | Any = key_data
-                    if isinstance(key_data, dict):
-                        unsigned = encode_matrix_canonical_json(key_data).encode(
-                            "utf-8"
-                        )
-                        stored_key_data = dict(key_data)
-                        stored_key_data["verified"] = verify_device_signature(
-                            user_id=user_id,
-                            device_keys=key_data,
-                            canonical_payload=unsigned,
-                        )
-                    self._keys[user_id][device_id] = stored_key_data
-
-        self._save()
-        log(
-            "TRACE",
-            f"已更新设备密钥缓存，当前 {sum(len(d) for d in self._keys.values())} 个设备",
+    async def claim(self, engine: Any, user_id: str, device_id: str) -> str:
+        device = self.get_device_key(user_id, device_id)
+        if not device or OLM_ALGORITHM not in device["keys"].get("algorithms", []):
+            raise CryptoError("Device does not support Olm")
+        result = await engine.call(
+            "keys_claim", one_time_keys={user_id: {device_id: "signed_curve25519"}}
         )
-
-    async def claim_one_time_key(
-        self, adapter: Adapter, bot: Bot, user_id: str, device_id: str
-    ) -> str | None:
-        """为指定设备索取一次性 Curve25519 密钥。
-
-        调用 /keys/claim API，返回 signed_curve25519 类型的 OTK 值。
-        此密钥用于建立出站 Olm 会话。
-
-        Returns:
-            one_time_key 的 base64 值，如果索取失败则返回 None
-        """
-        result = await adapter._api_keys_claim(  # type: ignore[union-attr]
-            bot,
-            one_time_keys={user_id: {device_id: "signed_curve25519"}},
-        )
-
-        failures = result.get("failures", {})
-        if failures and user_id in failures:
-            log("TRACE", f"索取 {user_id}/{device_id} 的 OTK 失败")
-            return None
-
-        one_time_keys = result.get("one_time_keys", {})
-        device_keys = one_time_keys.get(user_id, {}).get(device_id, {})
-        if not device_keys:
-            return None
-
-        for key_data in device_keys.values():
-            if isinstance(key_data, dict):
-                return key_data.get("key")
-            return key_data
-
-        return None
+        public = device["keys"]["keys"][f"ed25519:{device_id}"]
+        for key_id, value in (
+            result.get("one_time_keys", {}).get(user_id, {}).get(device_id, {}).items()
+        ):
+            if (
+                key_id.startswith("signed_curve25519:")
+                and isinstance(value, dict)
+                and verify_json(value, user_id, device_id, public)
+            ):
+                return value["key"]
+        raise CryptoError("No valid signed one-time key for device")

@@ -195,7 +195,7 @@ MATRIX_TOKEN_STORE_PATH='.data/matrix-tokens.json'
 
 ### 端到端加密 (E2EE)
 
-适配器支持 Matrix 端到端加密房间。E2EE 使用纯 Python 的可持久化加密状态机，依赖 `cryptography`，不再依赖 `python3-olm`。E2EE 是 opt-in 的：只有配置了 `e2ee_store_path` 或 `MATRIX_TOKEN_STORE_PATH` 时才会启用。
+适配器支持 Matrix 端到端加密房间。E2EE 默认启用，底层使用上游 `python3-olm` 的 libolm Olm v1/Megolm v1，并用 `cryptography` 完成 Secret Storage、附件和本地密钥保护。需要明文设备时显式设置 `e2ee_enabled: false`。
 
 ```dotenv
 MATRIX_BOTS='[
@@ -211,10 +211,11 @@ MATRIX_BOTS='[
 ]'
 ```
 
-- `recovery_key`：Matrix recovery key，用于从服务端现有密钥备份恢复 Megolm 会话密钥。
+- `recovery_key`：Matrix Secret Storage recovery key，用于恢复交叉签名秘密和备份私钥；备份私钥可通过 `bot.encryption().backups().enable(private_key)` 单独导入。
 - `secret_storage_passphrase`：用于读取现有 Secret Storage 及其备份密钥的 passphrase。
 - `recovery_code`：`recovery_key` 的兼容别名，已弃用。
-- `e2ee_store_path`：E2EE 加密状态的持久化目录路径。为 `None`（默认）时，会从 `MATRIX_TOKEN_STORE_PATH` 同目录下自动派生一个子目录（如 `e2ee_<hash>_<user>`）。如果两者均未设置，E2EE 完全禁用。
+- `e2ee_store_path`：E2EE 加密状态的持久化目录路径。未设置时从 `MATRIX_TOKEN_STORE_PATH` 同目录或 `.data/matrix/e2ee/` 自动派生，并绑定 homeserver、用户和设备 ID。
+- `e2ee_enabled`：是否初始化 E2EE，默认 `true`。
 
 **E2EE 工作流程：**
 
@@ -224,9 +225,9 @@ MATRIX_BOTS='[
 4. **设备列表跟踪**：自动处理 `/sync` 中的 `device_lists` 变更，查询新设备的密钥，保持设备密钥缓存更新。
 
 **注意事项：**
-- E2EE 状态使用版本化 JSON 保存，旧的 `python3-olm` pickle 不会被加载；升级后会创建新的设备密钥状态。
-- 纯 Python 状态机使用认证加密记录；与 Element / matrix-rust-sdk 的标准 Olm/Megolm ratchet 互操作需要额外协议向量验证。
-- 机器人目前不处理密钥验证（SAS/emoji），其他用户的设备标记为「未验证」不影响正常收发消息。
+- E2EE 状态使用加密的版本化 SQLite 保存。旧 JSON、pickle 和自有格式不会迁移，检测到后需要新设备和新目录。
+- `matrix_auto_accept_verification` 只接受验证请求，SAS/emoji 和二维码必须由插件比较后显式确认。
+- 加密状态、设备信任、交叉签名、Secret Storage、备份和恢复都通过 `bot.encryption()` 的对象 API 访问。
 
 ## 插件示例
 

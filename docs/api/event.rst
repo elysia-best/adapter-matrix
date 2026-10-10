@@ -92,6 +92,21 @@ Matrix 适配器将 homeserver 推送的各类事件映射为 NoneBot ``Event`` 
 通知事件
 --------
 
+加密事件
+~~~~~~~~
+
+适配器通过以下类型化事件报告加密状态，事件的 ``handle`` 属性提供对应的
+异步 SDK 对象和状态操作：
+
+- ``VerificationEvent`` — 验证请求、SAS 和二维码状态。
+- ``IdentityEvent`` — 设备信任和交叉签名身份变化。
+- ``DecryptionFailureEvent`` — 解密失败和密钥请求进度。
+- ``BackupEvent`` / ``RecoveryEvent`` — 备份和恢复进度。
+- ``AuthenticationEvent`` — UIA 或 OAuth 身份重置挑战。
+
+``matrix_auto_accept_verification`` 只接受验证请求；插件仍必须比较 SAS 或
+二维码后显式调用 ``confirm()``。
+
 成员变动 :class:`RoomMemberEvent`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

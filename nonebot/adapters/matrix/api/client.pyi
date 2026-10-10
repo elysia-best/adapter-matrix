@@ -350,3 +350,25 @@ class ApiClient:
         user_id: str | None = None,
     ) -> dict[str, Any]:
         """Read account data for Secret Storage recovery."""
+
+    async def keys_device_signing_upload(
+        self,
+        *,
+        master_key: dict[str, Any],
+        self_signing_key: dict[str, Any],
+        user_signing_key: dict[str, Any],
+        auth: dict[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
+    async def keys_signatures_upload(
+        self, *, signatures: dict[str, Any]
+    ) -> dict[str, Any]: ...
+    async def set_account_data(
+        self, *, event_type: str, content: dict[str, Any], user_id: str | None = None
+    ) -> None: ...
+    async def room_keys_create_version(
+        self, *, algorithm: str, auth_data: dict[str, Any]
+    ) -> dict[str, Any]: ...
+    async def room_keys_delete_version(self, *, version: str) -> None: ...
+    async def room_keys_put_keys(
+        self, *, version: str, rooms: dict[str, Any]
+    ) -> dict[str, Any]: ...

@@ -253,6 +253,7 @@ async def test_to_device_backup_and_media_endpoints(
         (200, b"{}"),
         (200, b'{"version":"7","algorithm":"m.megolm_backup.v1"}'),
         (200, b'{"rooms":{}}'),
+        (200, b"{}"),
         (200, b"binary-data"),
         (200, b"thumbnail-data"),
     ]
@@ -290,6 +291,18 @@ async def test_to_device_backup_and_media_endpoints(
         "/room_keys/keys/%21room%3Aexample.org/sid%2F1?version=7"
     )
 
+    await dummy_adapter._api_room_keys_put_keys(
+        dummy_bot,
+        version="7",
+        rooms={"!room:example.org": {"sessions": {}}},
+    )
+    put_request = dummy_adapter.request_calls[3]
+    assert put_request.method == "PUT"
+    assert parse_qs(urlsplit(request_url(put_request)).query) == {"version": ["7"]}
+    assert put_request.json == {
+        "rooms": {"!room:example.org": {"sessions": {}}}
+    }
+
     media = await dummy_adapter._api_download_media(
         dummy_bot,
         server_name="example.org:8448",
@@ -298,7 +311,7 @@ async def test_to_device_backup_and_media_endpoints(
         allow_remote=True,
     )
     assert media == b"binary-data"
-    assert request_url(dummy_adapter.request_calls[3]).endswith(
+    assert request_url(dummy_adapter.request_calls[4]).endswith(
         "/download/example.org%3A8448/media%2Fid/file%20name.txt?allow_remote=true"
     )
 
@@ -313,7 +326,7 @@ async def test_to_device_backup_and_media_endpoints(
     )
     assert thumbnail == b"thumbnail-data"
     thumbnail_query = parse_qs(
-        urlsplit(request_url(dummy_adapter.request_calls[4])).query
+        urlsplit(request_url(dummy_adapter.request_calls[5])).query
     )
     assert thumbnail_query == {
         "width": ["100"],

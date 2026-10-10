@@ -13,6 +13,7 @@ keywords = ["nonebot", "matrix", "bot"]
 requires-python = ">=3.10,<4.0.0"
 dependencies = [
     "base58>=2.1.1",
+    "python3-olm>=3.2.16,<4",
     "cryptography>=48.0.0",
     "nonebot2>=2.4.4",
     "requests-oauth2client>=1.8.0",
@@ -158,6 +159,12 @@ flake8-quotes = { inline-quotes = "double", multiline-quotes = "double" }
     "C901",    # crypto state machines mirror protocol branches
     "PLR0912", # crypto state machines mirror protocol branches
     "PLR0913", # protocol state records have explicit fields
+    "FBT003",  # persisted boolean records are not boolean flags
+    "PLR0915", # authenticated store initialization is intentionally transactional
+    "S603",    # Windows ACL command is built from the current local principal
+    "S607",    # Windows-only system tools are resolved by the platform
+    "TRY301",  # protocol errors are raised at the validation boundary
+    "PYI034",  # TaskLock returns itself for nested async context use
 ]
 "nonebot/adapters/matrix/event.py" = [
     "RUF002", # Chinese fullwidth punctuation in docstrings
@@ -166,6 +173,16 @@ flake8-quotes = { inline-quotes = "double", multiline-quotes = "double" }
     "RUF001", # Chinese fullwidth punctuation in log strings
     "RUF003", # Chinese fullwidth punctuation in comments
     "ERA001",  # Chinese comments that look like commented-out code
+    "SLF001",  # sync bookkeeping updates the owning Bot state
+    "C901",    # event dispatch follows independent Matrix event branches
+    "PLR0911", # event dispatch has explicit early exits for each event stage
+]
+"nonebot/adapters/matrix/room.py" = [
+    "ANN401",  # Room forwards the adapter's dynamic message and API payloads
+    "SLF001",  # Room is a facade over Bot's synchronized room state
+    "TRY003",  # public SDK errors include actionable protocol messages
+    "EM101",   # public SDK errors include actionable protocol messages
+    "PLC0415", # avoid importing message classes during adapter initialization
 ]
 "nonebot/adapters/matrix/api/handle.py" = [
     "RUF002", # Chinese fullwidth punctuation in docstrings

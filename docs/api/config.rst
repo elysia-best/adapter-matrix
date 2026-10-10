@@ -57,10 +57,15 @@ Matrix 适配器使用 Pydantic 模型管理配置，支持从 ``.env`` 文件�
      * ``auto_accept_blacklist`` — 黑名单（优先级高于白名单）。
 
    **E2EE 配置**
+     * ``e2ee_enabled`` — 是否初始化 E2EE，默认 ``True``。
+     * ``auto_enable_cross_signing`` — 启动时自动创建交叉签名，默认关闭。
+     * ``auto_enable_backups`` — 启动时自动创建密钥备份，默认关闭。
+     * ``backup_download_strategy`` — ``Manual`` / ``OneShot`` / ``AfterDecryptionFailure``。
+     * ``encryption_sharing_strategy`` — ``AllDevices`` / ``ErrorOnVerifiedUserProblem`` / ``IdentityBasedStrategy`` / ``OnlyTrustedDevices``。
      * ``recovery_key`` — Matrix recovery key（只读现有密钥备份）。
      * ``recovery_code`` — MATRIX_RECOVERY_CODE（密钥恢复私钥）。
      * ``secret_storage_passphrase`` — Secret Storage passphrase。
-     * ``matrix_auto_accept_verification`` — 全局开启后自动处理 SAS 验证（默认关闭）。
+     * ``matrix_auto_accept_verification`` — 只自动接受验证请求，不确认 SAS 或二维码（默认关闭）。
      * ``e2ee_store_path`` — E2EE 持久化目录。
 
    运行时字段（一般不需要手动设置）:
