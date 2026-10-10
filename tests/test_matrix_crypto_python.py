@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 from nonebot.adapters.matrix.crypto.account import OlmAccountManager
 from nonebot.adapters.matrix.crypto.attachments import (
@@ -20,7 +21,17 @@ from nonebot.adapters.matrix.crypto.secret_storage import (
 )
 from nonebot.adapters.matrix.crypto.sessions import OlmSessionManager
 from nonebot.adapters.matrix.crypto.store import CryptoStore
-from nonebot.adapters.matrix.crypto.types import DecryptionError, StoreError, TaskLock
+from nonebot.adapters.matrix.crypto.types import (
+    CryptoError,
+    DecryptionError,
+    StoreError,
+    TaskLock,
+)
+from nonebot.adapters.matrix.crypto.verification import (
+    SasState,
+    SasVerification,
+    VerificationRequest,
+)
 
 import olm
 import pytest
@@ -177,6 +188,42 @@ def test_pk_private_import_uses_native_authenticated_encryption() -> None:
         decryptor.decrypt(
             olm.PkMessage(message.ephemeral_key, "A" * 11, message.ciphertext)
         )
+
+
+async def test_sas_key_exchange_derives_matching_shared_bytes() -> None:
+    request = Mock(
+        spec=VerificationRequest,
+        engine=Mock(emit=AsyncMock()),
+        flow_id="verification-flow",
+        other_user_id="@peer:hs",
+    )
+    verification = SasVerification(request, we_started=False)
+    verification._state.set(SasState.ACCEPTED)
+    peer = olm.Sas()
+    peer.set_their_pubkey(verification.sas.pubkey)
+
+    await verification.handle("key", {"key": peer.pubkey})
+
+    assert verification.state() == SasState.KEYS_EXCHANGED
+    assert verification.their_key == peer.pubkey
+    assert verification.sas.generate_bytes("verification", 6) == peer.generate_bytes(
+        "verification", 6
+    )
+    request.send.assert_awaited_once_with("key", {"key": verification.sas.pubkey})
+
+
+@pytest.mark.parametrize("key", [None, 123, b"not-a-string"])
+async def test_sas_key_exchange_rejects_non_string_keys(key: object) -> None:
+    request = Mock(spec=VerificationRequest)
+    verification = SasVerification(request, we_started=False)
+    verification._state.set(SasState.ACCEPTED)
+
+    with pytest.raises(CryptoError, match="Unexpected SAS key"):
+        await verification.handle("key", {"key": key})
+
+    assert verification.their_key is None
+    assert verification.state() == SasState.ACCEPTED
+    request.send.assert_not_awaited()
 
 
 def test_store_rejects_legacy_without_deleting_it(tmp_path: Path) -> None:

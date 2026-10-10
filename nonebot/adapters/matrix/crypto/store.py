@@ -18,7 +18,7 @@ from typing import Any
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-import olm
+from olm.account import Account, OlmAccountError
 
 from .primitives import b64e
 from .types import StoreError
@@ -170,16 +170,16 @@ class CryptoStore:
             if row[0].startswith(prefix)
         ]
 
-    def load_account(self) -> olm.Account | None:
+    def load_account(self) -> Account | None:
         value = self.get("account")
         if value is None:
             return None
         try:
-            return olm.Account.from_pickle(value.encode("ascii"), self.pickle_key)
-        except (olm.OlmAccountError, ValueError) as exc:
+            return Account.from_pickle(value.encode("ascii"), self.pickle_key)
+        except (OlmAccountError, ValueError) as exc:
             raise StoreError("Invalid libolm account pickle") from exc
 
-    def save_account(self, account: olm.Account) -> None:
+    def save_account(self, account: Account) -> None:
         self.put("account", account.pickle(self.pickle_key).decode("ascii"))
 
     def close(self) -> None:

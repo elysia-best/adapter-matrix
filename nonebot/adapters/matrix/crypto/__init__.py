@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-import olm
+from olm.group_session import OlmGroupSessionError
 
 from .account import OlmAccountManager
 from .attachments import decrypt_attachment, export_room_keys, import_room_keys
@@ -37,6 +37,7 @@ from .types import (
 )
 from .verification import VerificationManager
 from ..api.model import RawMatrixEvent
+from ..api.types import UserId
 from ..exception import ActionFailed
 from ..utils import log
 
@@ -386,7 +387,7 @@ class CryptoEngine:
             self.store.delete(f"secret_request/{content['request_id']}")
         elif event_type.startswith("m.key.verification."):
             await self.verifications.handle(
-                RawMatrixEvent(type=event_type, sender=sender, content=content)
+                RawMatrixEvent(type=event_type, sender=UserId(sender), content=content)
             )
 
     async def _key_request(self, sender: str, content: dict[str, Any]) -> None:
@@ -512,7 +513,7 @@ class CryptoEngine:
                         CryptoError,
                         ValueError,
                         KeyError,
-                        olm.OlmGroupSessionError,
+                        OlmGroupSessionError,
                     ) as exc:
                         log(
                             "WARNING",

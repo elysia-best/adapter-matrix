@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from http import HTTPStatus
 import json
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, overload
 from urllib.parse import quote
 
 from nonebot.compat import type_validate_python
@@ -674,6 +674,36 @@ class HandleMixin:
             ),
         )
         return type_validate_python(LeaveRoomResponse, data)
+
+    @overload
+    async def _api_get_room_state(
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        room_id: RoomIdentifier,
+        event_type: None = None,
+        state_key: str | None = None,
+    ) -> RoomStateResponse: ...
+
+    @overload
+    async def _api_get_room_state(
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        room_id: RoomIdentifier,
+        event_type: EventType,
+        state_key: str | None = None,
+    ) -> RawMatrixEvent: ...
+
+    @overload
+    async def _api_get_room_state(
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        room_id: RoomIdentifier,
+        event_type: EventType | None,
+        state_key: str | None = None,
+    ) -> RoomStateResponse | RawMatrixEvent: ...
 
     async def _api_get_room_state(
         self: AdapterProtocol,

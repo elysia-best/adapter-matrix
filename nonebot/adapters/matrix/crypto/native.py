@@ -7,12 +7,12 @@ or implement its public-key encryption algorithm in Python.
 from __future__ import annotations
 
 from _libolm import ffi, lib
-import olm
+from olm.pk import PkDecryption
 
 from .types import CryptoError
 
 
-def pk_from_private(private_key: bytes) -> olm.PkDecryption:
+def pk_from_private(private_key: bytes) -> PkDecryption:
     required = (
         "olm_get_library_version",
         "olm_pk_key_from_private",
@@ -27,13 +27,18 @@ def pk_from_private(private_key: bytes) -> olm.PkDecryption:
         raise CryptoError("libolm 3.2 or later is required")
     if len(private_key) != lib.olm_pk_private_key_length():
         raise ValueError("Backup private key must contain 32 bytes")
-    obj = olm.PkDecryption.__new__(olm.PkDecryption)
+    obj = PkDecryption.__new__(PkDecryption)
     length = lib.olm_pk_key_length()
     public = ffi.new("char[]", length)
     secret = ffi.new("char[]", private_key)
     try:
+        # Upstream initializes this CFFI handle in __new__ without a type declaration.
         result = lib.olm_pk_key_from_private(
-            obj._pk_decryption, public, length, secret, len(private_key)
+            obj._pk_decryption,  # pyright: ignore[reportAttributeAccessIssue]
+            public,
+            length,
+            secret,
+            len(private_key),
         )
         if result == lib.olm_error():
             raise CryptoError("libolm rejected the backup private key")

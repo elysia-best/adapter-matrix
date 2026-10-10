@@ -11,7 +11,7 @@ from time import monotonic, time
 from typing import Any
 from uuid import uuid4
 
-import olm
+from olm.sas import OlmSasError, Sas
 
 from .device_keys import signing_key
 from .identities import Device
@@ -373,7 +373,7 @@ class SasVerification:
     def __init__(self, request: VerificationRequest, *, we_started: bool) -> None:
         self.request = request
         self.we_started = we_started
-        self.sas = olm.Sas()
+        self.sas = Sas()
         self.start_content: dict[str, Any] = {}
         self.accept_content: dict[str, Any] = {}
         self.their_key: str | None = None
@@ -568,12 +568,17 @@ class SasVerification:
             await self.request.send("key", {"key": self.sas.pubkey})
             await self._change(SasState.ACCEPTED)
         elif kind == "key":
-            if self.state() != SasState.ACCEPTED or len(b64d(content["key"])) != 32:
+            key = content["key"]
+            if (
+                self.state() != SasState.ACCEPTED
+                or not isinstance(key, str)
+                or len(b64d(key)) != 32
+            ):
                 raise CryptoError("Unexpected SAS key")
             if self.we_started:
                 commitment = b64e(
                     hashlib.sha256(
-                        (content["key"] + canonical_json(self.start_content)).encode()
+                        (key + canonical_json(self.start_content)).encode()
                     ).digest()
                 )
                 if not hmac.compare_digest(
@@ -581,8 +586,8 @@ class SasVerification:
                 ):
                     await self.request.cancel("m.mismatched_commitment")
                     return
-            self.their_key = content["key"]
-            self.sas.set_their_pubkey(self.their_key)
+            self.their_key = key
+            self.sas.set_their_pubkey(key)
             if not self.we_started:
                 await self.request.send("key", {"key": self.sas.pubkey})
             await self._change(SasState.KEYS_EXCHANGED)
@@ -895,6 +900,6 @@ class VerificationManager:
             else:
                 raise CryptoError("Unexpected verification event")
             request._seen.add(marker)
-        except (CryptoError, ValueError, KeyError, TypeError, olm.OlmSasError):
+        except (CryptoError, ValueError, KeyError, TypeError, OlmSasError):
             await request.cancel("m.invalid_message")
         return True

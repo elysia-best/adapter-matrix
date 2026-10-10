@@ -6,7 +6,7 @@ import json
 import os
 from typing import Any
 
-import olm
+from olm.pk import PkEncryption, PkMessage
 
 from .device_keys import signing_key
 from .native import pk_from_private
@@ -129,7 +129,7 @@ class Backups:
             raise CryptoError(
                 "Backup version changed; validate the new backup before uploading"
             )
-        encryptor = olm.PkEncryption(backup["auth_data"]["public_key"])
+        encryptor = PkEncryption(backup["auth_data"]["public_key"])
         rooms: dict[str, Any] = {}
         names = []
         for value in self.engine.megolm.export_keys():
@@ -204,7 +204,7 @@ class Backups:
         for room, room_data in rooms.items():
             for sid, record in room_data.get("sessions", {}).items():
                 encrypted = record["session_data"]
-                message = olm.PkMessage(
+                message = PkMessage(
                     encrypted["ephemeral"], encrypted["mac"], encrypted["ciphertext"]
                 )
                 value = json.loads(decryptor.decrypt(message, unicode_errors="strict"))

@@ -5,7 +5,14 @@ from __future__ import annotations
 from time import time_ns
 from typing import Any
 
-import olm
+from olm.session import (
+    InboundSession,
+    OlmMessage,
+    OlmPreKeyMessage,
+    OlmSessionError,
+    OutboundSession,
+    Session,
+)
 
 from .account import OlmAccountManager
 from .store import CryptoStore
@@ -28,7 +35,7 @@ class OlmSessionManager:
             key=lambda pair: pair[1]["last_used"],
         )
 
-    def _save(self, session: olm.Session, sender_key: str) -> None:
+    def _save(self, session: Session, sender_key: str) -> None:
         self.store.put(
             f"olm/{session.id}",
             {
@@ -38,23 +45,21 @@ class OlmSessionManager:
             },
         )
 
-    def get(self, sender_key: str) -> olm.Session | None:
+    def get(self, sender_key: str) -> Session | None:
         records = self._records(sender_key)
         if not records:
             return None
-        return olm.Session.from_pickle(
+        return Session.from_pickle(
             records[-1][1]["pickle"].encode("ascii"), self.store.pickle_key
         )
 
-    def create_outbound_session(
-        self, sender_key: str, one_time_key: str
-    ) -> olm.Session:
-        session = olm.OutboundSession(self.account.account, sender_key, one_time_key)
+    def create_outbound_session(self, sender_key: str, one_time_key: str) -> Session:
+        session = OutboundSession(self.account.account, sender_key, one_time_key)
         self._save(session, sender_key)
         return session
 
     def encrypt(
-        self, session: olm.Session, sender_key: str, plaintext: str
+        self, session: Session, sender_key: str, plaintext: str
     ) -> dict[str, Any]:
         message = session.encrypt(plaintext)
         self._save(session, sender_key)
@@ -66,31 +71,33 @@ class OlmSessionManager:
         if message_type not in (0, 1) or not sender_key:
             raise DecryptionError("InvalidOlmMessage")
         message = (
-            olm.OlmPreKeyMessage(ciphertext)
+            OlmPreKeyMessage(ciphertext)
             if message_type == 0
-            else olm.OlmMessage(ciphertext)
+            else OlmMessage(ciphertext)
         )
         for _, record in reversed(self._records(sender_key)):
-            session = olm.Session.from_pickle(
+            session = Session.from_pickle(
                 record["pickle"].encode("ascii"), self.store.pickle_key
             )
             try:
-                if message_type == 0 and not session.matches(message, sender_key):
+                if isinstance(message, OlmPreKeyMessage) and not session.matches(
+                    message, sender_key
+                ):
                     continue
                 plaintext = session.decrypt(message, unicode_errors="strict")
-            except olm.OlmSessionError:
+            except OlmSessionError:
                 continue
             self._save(session, sender_key)
             return plaintext
-        if message_type == 0:
+        if isinstance(message, OlmPreKeyMessage):
             try:
-                session = olm.InboundSession(self.account.account, message, sender_key)
+                session = InboundSession(self.account.account, message, sender_key)
                 plaintext = session.decrypt(message, unicode_errors="strict")
                 with self.store.transaction():
                     self.account.account.remove_one_time_keys(session)
                     self.account.save()
                     self._save(session, sender_key)
                 return plaintext
-            except olm.OlmSessionError as exc:
+            except OlmSessionError as exc:
                 raise DecryptionError("InvalidOlmMessage") from exc
         raise DecryptionError("MissingOlmSession")

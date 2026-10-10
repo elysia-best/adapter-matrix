@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import olm
+from olm.pk import PkSigning
 
 from .device_keys import signing_key
 from .primitives import b64d, b64e, sign_json, verify_json
@@ -129,11 +129,11 @@ class CrossSigning:
             for usage in ("master", "self_signing", "user_signing")
         }
 
-    def signer(self, usage: str) -> olm.PkSigning:
+    def signer(self, usage: str) -> PkSigning:
         value = self.engine.store.get(f"secret/m.cross_signing.{usage}")
         if value is None:
             raise CryptoError(f"Missing cross-signing {usage} secret")
-        return olm.PkSigning(b64d(value))
+        return PkSigning(b64d(value))
 
     async def bootstrap(
         self, auth_data: dict[str, Any] | None = None, *, reset: bool = False
@@ -151,12 +151,10 @@ class CrossSigning:
             return
         if pending is None:
             seeds = {
-                usage: b64e(olm.PkSigning.generate_seed())
+                usage: b64e(PkSigning.generate_seed())
                 for usage in ("master", "self_signing", "user_signing")
             }
-            signers = {
-                usage: olm.PkSigning(b64d(seed)) for usage, seed in seeds.items()
-            }
+            signers = {usage: PkSigning(b64d(seed)) for usage, seed in seeds.items()}
             keys = {
                 usage: {
                     "user_id": engine.user_id,
@@ -193,7 +191,7 @@ class CrossSigning:
         identity = self.engine.devices.identity(self.engine.user_id)
         if identity is None or usage not in identity:
             raise CryptoError("Published cross-signing key is unavailable")
-        signer = olm.PkSigning(b64d(seed))
+        signer = PkSigning(b64d(seed))
         if signer.public_key != signing_key(
             identity[usage], self.engine.user_id, usage
         ):

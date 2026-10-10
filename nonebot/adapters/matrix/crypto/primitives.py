@@ -6,7 +6,7 @@ import base64
 import json
 from typing import Any
 
-import olm
+from olm.utility import OlmVerifyError, ed25519_verify
 
 OLM_ALGORITHM = "m.olm.v1.curve25519-aes-sha2"
 MEGOLM_ALGORITHM = "m.megolm.v1.aes-sha2"
@@ -67,7 +67,7 @@ def verify_json(
 ) -> bool:
     try:
         signature = value["signatures"][user_id][f"ed25519:{key_id}"]
-        olm.ed25519_verify(public_key, signing_json(value), signature)
-    except (KeyError, TypeError, ValueError, olm.OlmVerifyError):
+        ed25519_verify(public_key, signing_json(value), signature)
+    except (KeyError, TypeError, ValueError, OlmVerifyError):
         return False
     return True

@@ -6,7 +6,11 @@ import json
 from time import time
 from typing import Any
 
-import olm
+from olm.group_session import (
+    InboundGroupSession,
+    OlmGroupSessionError,
+    OutboundGroupSession,
+)
 
 from .primitives import MEGOLM_ALGORITHM
 from .store import CryptoStore
@@ -19,10 +23,10 @@ class MegolmManager:
 
     def outbound(
         self, room_id: str, settings: dict[str, Any], identity: dict[str, str]
-    ) -> tuple[olm.OutboundGroupSession, dict[str, Any]]:
+    ) -> tuple[OutboundGroupSession, dict[str, Any]]:
         record = self.store.get(f"outbound/{room_id}")
         if record is not None:
-            session = olm.OutboundGroupSession.from_pickle(
+            session = OutboundGroupSession.from_pickle(
                 record["pickle"].encode(), self.store.pickle_key
             )
             period = max(
@@ -34,7 +38,7 @@ class MegolmManager:
                 time() - record["created"]
             ) * 1000 < period and session.message_index < limit:
                 return session, record
-        session = olm.OutboundGroupSession()
+        session = OutboundGroupSession()
         record = {
             "created": time(),
             "shared": {},
@@ -58,7 +62,7 @@ class MegolmManager:
         return session, record
 
     def save_outbound(
-        self, room_id: str, session: olm.OutboundGroupSession, record: dict[str, Any]
+        self, room_id: str, session: OutboundGroupSession, record: dict[str, Any]
     ) -> None:
         record["pickle"] = session.pickle(self.store.pickle_key).decode()
         self.store.put(f"outbound/{room_id}", record)
@@ -70,9 +74,9 @@ class MegolmManager:
         if value.get("algorithm", MEGOLM_ALGORITHM) != MEGOLM_ALGORITHM:
             raise DecryptionError("UnsupportedAlgorithm")
         session = (
-            olm.InboundGroupSession.import_session(value["session_key"])
+            InboundGroupSession.import_session(value["session_key"])
             if exported
-            else olm.InboundGroupSession(value["session_key"])
+            else InboundGroupSession(value["session_key"])
         )
         if (
             session.id != value["session_id"]
@@ -88,7 +92,7 @@ class MegolmManager:
                 or previous["sender_claimed_keys"] != value["sender_claimed_keys"]
             ):
                 raise DecryptionError("RoomKeyOriginMismatch")
-            old = olm.InboundGroupSession.from_pickle(
+            old = InboundGroupSession.from_pickle(
                 previous["pickle"].encode(), self.store.pickle_key
             )
             if old.first_known_index <= session.first_known_index:
@@ -111,7 +115,7 @@ class MegolmManager:
                 continue
             if session_id is not None and record["session_id"] != session_id:
                 continue
-            session = olm.InboundGroupSession.from_pickle(
+            session = InboundGroupSession.from_pickle(
                 record["pickle"].encode(), self.store.pickle_key
             )
             values.append(
@@ -139,7 +143,7 @@ class MegolmManager:
             raise DecryptionError("SenderKeyMismatch")
         if record.get("sender") and raw.get("sender") != record["sender"]:
             raise DecryptionError("SenderMismatch")
-        session = olm.InboundGroupSession.from_pickle(
+        session = InboundGroupSession.from_pickle(
             record["pickle"].encode(), self.store.pickle_key
         )
         try:
@@ -147,7 +151,7 @@ class MegolmManager:
                 content["ciphertext"], unicode_errors="strict"
             )
             decrypted = json.loads(text)
-        except (olm.OlmGroupSessionError, ValueError, KeyError) as exc:
+        except (OlmGroupSessionError, ValueError, KeyError) as exc:
             raise DecryptionError("InvalidMegolmMessage") from exc
         if (
             not isinstance(decrypted, dict)

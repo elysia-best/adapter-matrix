@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import olm
+from olm.account import Account
 
 from .primitives import MEGOLM_ALGORITHM, OLM_ALGORITHM, sign_json
 from .store import CryptoStore
@@ -14,10 +14,10 @@ from .types import CryptoError, StoreError
 class OlmAccountManager:
     def __init__(self, store: CryptoStore) -> None:
         self._store = store
-        self._account: olm.Account | None = None
+        self._account: Account | None = None
 
     @property
-    def account(self) -> olm.Account:
+    def account(self) -> Account:
         if self._account is None:
             raise CryptoError("Olm account is not initialized")
         return self._account
@@ -29,7 +29,7 @@ class OlmAccountManager:
                 raise StoreError(
                     "Account is missing from the crypto store; use a new device and directory"
                 )
-            self._account = olm.Account()
+            self._account = Account()
             self.save()
 
     def save(self) -> None:

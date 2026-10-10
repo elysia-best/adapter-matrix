@@ -3,7 +3,9 @@ from __future__ import annotations
 # The runtime facade forwards arbitrary endpoint keyword payloads; precise
 # signatures are generated in client.pyi.
 # ruff: noqa: ANN401
-from typing import Any
+from typing import Any, cast
+
+from nonebot.adapters import Bot as BaseBot
 
 
 class ApiClient:
@@ -15,7 +17,7 @@ class ApiClient:
     """
 
     async def _matrix_call(self, name: str, **data: Any) -> Any:
-        return await self.call_api(name, **data)  # type: ignore[attr-defined]
+        return await cast("BaseBot", self).call_api(name, **data)
 
     async def get_login_flows(self) -> Any:
         return await self._matrix_call("get_login_flows")
