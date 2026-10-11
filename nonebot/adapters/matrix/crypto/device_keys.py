@@ -139,7 +139,7 @@ class DeviceKeyStore:
     async def claim(self, engine: Any, user_id: str, device_id: str) -> str:
         device = self.get_device_key(user_id, device_id)
         if not device or OLM_ALGORITHM not in device["keys"].get("algorithms", []):
-            raise CryptoError("Device does not support Olm")
+            raise CryptoError(f"Device does not support Olm: {user_id}|{device_id}")
         result = await engine.call(
             "keys_claim", one_time_keys={user_id: {device_id: "signed_curve25519"}}
         )
@@ -153,4 +153,6 @@ class DeviceKeyStore:
                 and verify_json(value, user_id, device_id, public)
             ):
                 return value["key"]
-        raise CryptoError("No valid signed one-time key for device")
+        raise CryptoError(
+            f"No valid signed one-time key for device: {user_id}|{device_id}"
+        )

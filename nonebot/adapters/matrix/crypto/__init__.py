@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
+from time import time_ns
 from typing import Any
 from uuid import uuid4
 
@@ -40,6 +41,11 @@ from ..api.model import RawMatrixEvent
 from ..api.types import UserId
 from ..exception import ActionFailed
 from ..utils import log
+
+# Per-user recovery notifications are rate-limited, mirroring
+# matrix-rust-sdk's one-hour unwedging interval.
+NO_OLM_RECOVERY_INTERVAL_NS = 3_600_000_000_000
+MAX_SENDER_KEY_REQUESTS = 50
 
 
 class CryptoEngine:
@@ -224,6 +230,9 @@ class CryptoEngine:
         if session is None:
             key = await self.devices.claim(self, user_id, device_id)
             session = self.sessions.create_outbound_session(curve, key)
+            # A fresh session can reach the device again; allow a future
+            # m.no_olm withholding if the session breaks again.
+            self.store.delete(f"no_olm_notified/{user_id}/{device_id}")
         identity = self.account.account.identity_keys
         payload = {
             "sender": self.user_id,
@@ -255,6 +264,36 @@ class CryptoEngine:
             self.store.put(f"outgoing/{request_id}", request)
         async with self._outgoing_lock:
             await self._execute(request_id, request)
+
+    async def _notify_device_no_olm(self, user_id: str, device_id: str) -> None:
+        """Tell a device once that no Olm session could be established.
+
+        Mirrors matrix-rust-sdk's single-shot m.no_olm withholding: no
+        repeat until a new Olm session has been established successfully.
+        """
+        name = f"no_olm_notified/{user_id}/{device_id}"
+        if self.store.get(name):
+            return
+        try:
+            await self.send_to_device(
+                user_id,
+                device_id,
+                "m.room_key.withheld",
+                {
+                    "algorithm": MEGOLM_ALGORITHM,
+                    "code": "m.no_olm",
+                    "sender_key": self.account.account.identity_keys["curve25519"],
+                    "from_device": self.device_id,
+                },
+            )
+        except Exception as exc:
+            # Best-effort notification; a failure must not break sharing.
+            log(
+                "WARNING",
+                f"Failed to send m.no_olm withheld to {user_id}|{device_id}: {exc}",
+            )
+            return
+        self.store.put(name, True)
 
     async def handle_to_device_event(self, raw: RawMatrixEvent) -> None:
         async with self._lock:
@@ -320,18 +359,23 @@ class CryptoEngine:
         elif raw.type == "m.secret.request":
             await self._secret_request(sender, content)
         elif raw.type == "m.room_key.withheld":
-            self.store.put(
-                f"withheld/{content.get('room_id')}/{content.get('session_id')}",
-                content,
-            )
+            code = content.get("code")
+            if code != "m.no_olm":
+                # m.no_olm carries no room/session; do not store None keys.
+                self.store.put(
+                    f"withheld/{content.get('room_id')}/{content.get('session_id')}",
+                    content,
+                )
             await self.emit(
                 "decryption",
                 {
                     "room_id": content.get("room_id"),
-                    "code": content.get("code"),
+                    "code": code,
                     "user_id": sender,
                 },
             )
+            if code == "m.no_olm":
+                await self._recover_no_olm(sender)
         # Room keys and secrets are accepted only from authenticated Olm envelopes.
 
     async def _receive_authenticated(
@@ -441,6 +485,90 @@ class CryptoEngine:
                 "body": body,
             },
         )
+
+    async def _recover_no_olm(self, sender: str) -> None:
+        """Recover from an m.no_olm withholding (spec-recommended flow).
+
+        matrix-rust-sdk keeps the receiving side a no-op here; the spec
+        instead recommends starting an Olm session towards the sender,
+        notifying it with an m.dummy, and re-requesting the missing keys
+        over the new session.
+        """
+        name = f"no_olm_recovery/{sender}"
+        last = self.store.get(name)
+        if last and time_ns() - last.get("at", 0) < NO_OLM_RECOVERY_INTERVAL_NS:
+            return
+        self.store.put(name, {"at": time_ns()})
+        try:
+            await self.devices.query(self, [sender])
+            for did, device in self.devices.get_device_keys_for_user(sender).items():
+                if device.get("local_trust") == LocalTrust.BLACKLISTED:
+                    continue
+                keys = device["keys"].get("keys", {})
+                curve = keys.get(f"curve25519:{did}")
+                if not curve or OLM_ALGORITHM not in device["keys"].get(
+                    "algorithms", []
+                ):
+                    continue
+                # An existing session already lets the sender reach us.
+                if self.sessions.get(curve) is not None:
+                    continue
+                try:
+                    await self.send_encrypted_to_device(sender, did, "m.dummy", {})
+                except CryptoError as exc:
+                    log(
+                        "WARNING",
+                        f"Failed to establish an Olm session with {sender}|{did}: {exc}",
+                    )
+        except (CryptoError, ValueError, KeyError) as exc:
+            log("WARNING", f"m.no_olm recovery failed for {sender}: {exc}")
+        try:
+            await self._request_missing_keys(sender)
+        except (CryptoError, ValueError, KeyError) as exc:
+            log("WARNING", f"Failed to request missing keys from {sender}: {exc}")
+
+    async def _request_missing_keys(self, sender: str) -> None:
+        """Ask the sender to (re)share sessions of undecryptable events."""
+        sent = 0
+        for name in self.store.names("undecrypted/"):
+            if sent >= MAX_SENDER_KEY_REQUESTS:
+                break
+            pending = self.store.get(name)
+            if not pending or pending.get("event", {}).get("sender") != sender:
+                continue
+            room_id = pending.get("room_id")
+            content = pending["event"].get("content", {})
+            session_id = content.get("session_id")
+            sender_key = content.get("sender_key")
+            if not (
+                isinstance(room_id, str)
+                and isinstance(session_id, str)
+                and isinstance(sender_key, str)
+            ):
+                continue
+            # Distinct from `key_request/` (own devices); this one targets
+            # the original sender per the spec's m.dummy companion flow.
+            dedup = f"key_request_sender/{room_id}/{session_id}"
+            if self.store.get(dedup):
+                continue
+            self.store.put(dedup, True)
+            await self.send_to_device(
+                sender,
+                "*",
+                "m.room_key_request",
+                {
+                    "action": "request",
+                    "request_id": uuid4().hex,
+                    "requesting_device_id": self.device_id,
+                    "body": {
+                        "room_id": room_id,
+                        "algorithm": MEGOLM_ALGORITHM,
+                        "session_id": session_id,
+                        "sender_key": sender_key,
+                    },
+                },
+            )
+            sent += 1
 
     async def request_secrets(self, device_id: str) -> None:
         for name in SECRETS:
@@ -601,7 +729,9 @@ class CryptoEngine:
                     continue
                 keys = device["keys"].get("keys", {})
                 curve = keys.get(f"curve25519:{did}")
-                if not curve:
+                if not curve or OLM_ALGORITHM not in device["keys"].get(
+                    "algorithms", []
+                ):
                     continue
                 recipient = f"{uid}|{did}|{curve}"
                 if recipient in record["shared"]:
@@ -646,17 +776,24 @@ class CryptoEngine:
                         },
                     )
                     continue
-                await self.send_encrypted_to_device(
-                    uid,
-                    did,
-                    "m.room_key",
-                    {
-                        "algorithm": MEGOLM_ALGORITHM,
-                        "room_id": room_id,
-                        "session_id": session.id,
-                        "session_key": session.session_key,
-                    },
-                )
+                try:
+                    await self.send_encrypted_to_device(
+                        uid,
+                        did,
+                        "m.room_key",
+                        {
+                            "algorithm": MEGOLM_ALGORITHM,
+                            "room_id": room_id,
+                            "session_id": session.id,
+                            "session_key": session.session_key,
+                        },
+                    )
+                except CryptoError as exc:
+                    # Align with matrix-rust-sdk: a device without a usable
+                    # Olm session must not abort sharing with the room.
+                    log("WARNING", f"Skipped room key share with {uid}|{did}: {exc}")
+                    await self._notify_device_no_olm(uid, did)
+                    continue
                 record["shared"][recipient] = session.message_index
                 self.megolm.save_outbound(room_id, session, record)
         self.megolm.save_outbound(room_id, session, record)

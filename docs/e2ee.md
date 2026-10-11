@@ -88,7 +88,7 @@ Bot 启动时，加密引擎执行以下步骤：
 | `m.room_key` | 导入 Megolm 入站会话密钥 |
 | `m.forwarded_room_key` | 转发的 Megolm 会话密钥 |
 | `m.room_key_request` | 密钥请求（只向自己的已验证设备转发） |
-| `m.room_key.withheld` | 密钥被拒通知 |
+| `m.room_key.withheld` | 密钥被拒通知（`m.no_olm` 会触发自愈流程，见下文） |
 
 ## 密钥恢复
 
@@ -100,6 +100,32 @@ Bot 启动时，加密引擎执行以下步骤：
 4. 将恢复的会话导入本地 Megolm 管理器，使其可立即解密历史消息。
 
 这使得新设备（或不持久化 Megolm 会话的设备）在无需其他设备在线的情况下，也能解密加密房间的消息。
+
+## 发送容错与 m.no_olm 自愈
+
+### 单设备发送容错
+
+房间内成员设备的 OTK 池可能耗尽（例如长期不用的旧设备）。发送加密消息前向每个成员设备共享 Megolm 会话密钥时，适配器对单个设备的失败保持容错：
+
+1. 尝试建立 Olm 会话失败（如 `No valid signed one-time key for device`）时，记录 `Skipped room key share with <user>|<device>` 警告并跳过该设备，消息仍正常发给其余设备（对齐 matrix-rust-sdk 的失败收集行为，其余设备不受影响）。
+2. 对跳过的设备只发送一次 `m.room_key.withheld`（`code=m.no_olm`，不含 `room_id`/`session_id`）；之后与该设备成功建立过 Olm 会话时，才允许再次通知。
+3. 跳过的设备不记入已分享列表，之后的每次发送会自动重试。
+
+### 收到 m.no_olm 后的恢复
+
+收到 `m.room_key.withheld` 且 `code` 为 `m.no_olm`（对方无法与我们建立 Olm 会话）时，适配器按规范执行恢复流程（对每个发送方 1 小时内最多执行一次）：
+
+1. 向对方尚未建立会话的设备发起 Olm 会话，并发送 `m.dummy` 通知新会话已建立。
+2. 对本端仍未解密的历史消息，向对方设备补发 `m.room_key_request`（与发给自身设备的请求使用不同的去重记录）；密钥到达后自动重试解密。
+
+> 官方 matrix-rust-sdk 目前对收到 `m.no_olm` 不做主动恢复（仅记录）。本节流程为规范（`m.room_key.withheld` / `m.dummy`）推荐的增强实现。
+
+### 排障：No valid signed one-time key for device
+
+该错误（现在以 WARNING 形式出现）表示某个成员设备没有可用的 `signed_curve25519` 一次性密钥——通常是已废弃、不再运行的旧设备。
+
+- 行为：该设备被跳过，其余设备正常收到密钥，消息不会发送失败。
+- 建议：在服务端清理不再使用的旧设备（在 Element 等客户端登录对应账号后，于「设置 → 会话/设备」中删除），可减少无效的密钥索取与 `m.no_olm` 噪声。
 
 ## 注意事项
 
