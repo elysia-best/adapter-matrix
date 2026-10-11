@@ -28,7 +28,7 @@ from .event import (
     VerificationEvent,
     event_classes,
 )
-from .message import Message, MessageSegment
+from .message import Message, MessageSegment, build_edit_content
 from .room import Room
 from .utils import log
 
@@ -67,6 +67,7 @@ __all__ = (
     "UserIdentity",
     "VerificationEvent",
     "VerificationRequest",
+    "build_edit_content",
     "event_classes",
     "is_not_unset",
     "is_unset",

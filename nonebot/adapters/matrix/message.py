@@ -18,7 +18,7 @@ from .api.types import EventId, MxcUri, UserId
 from .utils import escape, log, unescape
 
 MATRIX_HTML_FORMAT = "org.matrix.custom.html"
-MEDIA_SEGMENT_TYPES = {"image", "file", "audio", "video"}
+MEDIA_SEGMENT_TYPES = {"image", "file", "audio", "video", "sticker"}
 SEGMENT_MSGTYPE_MAP = {
     "text": "m.text",
     "notice": "m.notice",
@@ -27,6 +27,7 @@ SEGMENT_MSGTYPE_MAP = {
     "file": "m.file",
     "audio": "m.audio",
     "video": "m.video",
+    "sticker": "m.sticker",
 }
 MSGTYPE_SEGMENT_MAP = {value: key for key, value in SEGMENT_MSGTYPE_MAP.items()}
 
@@ -124,6 +125,17 @@ class MessageSegment(BaseMessageSegment["Message"]):
         info: dict[str, Any] | None = None,
     ) -> MediaSegment:
         return _media_segment("video", content, filename, body, content_type, info)
+
+    @staticmethod
+    def sticker(
+        content: bytes | str | MxcUri,
+        *,
+        filename: str | None = None,
+        body: str | None = None,
+        content_type: str | None = None,
+        info: dict[str, Any] | None = None,
+    ) -> MediaSegment:
+        return _media_segment("sticker", content, filename, body, content_type, info)
 
     @staticmethod
     def raw(content: dict[str, Any], event_type: str | None = None) -> RawSegment:
@@ -241,6 +253,7 @@ SEGMENT_TYPE_MAP = {
     "file": MediaSegment,
     "audio": MediaSegment,
     "video": MediaSegment,
+    "sticker": MediaSegment,
     "raw": RawSegment,
 }
 
@@ -316,6 +329,21 @@ async def build_message_content(
     bot: MediaUploader | None = None,
 ) -> dict[str, Any]:
     return await _build_message_content_async(_ensure_message(message), bot=bot)
+
+
+def build_edit_content(
+    message: str | BaseMessage | BaseMessageSegment, event_id: str
+) -> dict[str, Any]:
+    """Build the Matrix ``m.replace`` payload for an existing message."""
+    replacement = _build_message_content(_ensure_message(message))
+    new_content = dict(replacement)
+    new_content.pop("m.relates_to", None)
+    return {
+        "msgtype": replacement.get("msgtype", "m.text"),
+        "body": f"* {replacement.get('body', '')}",
+        "m.new_content": new_content,
+        "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
+    }
 
 
 def _build_message_content(message: Message) -> dict[str, Any]:
@@ -459,13 +487,19 @@ def message_from_content(content: dict[str, Any]) -> Message:
             f"body: {escape_tag(str(body))}",
         )
         return Message(factory(body))
-    if msgtype in {"m.image", "m.file", "m.audio", "m.video"}:
+    if msgtype == "m.location":
+        return Message(MessageSegment.raw(content, event_type="m.room.message"))
+    if msgtype in {"m.image", "m.file", "m.audio", "m.video", "m.sticker"}:
         segment_type = MSGTYPE_SEGMENT_MAP[msgtype]
         factory = getattr(MessageSegment, segment_type)
         segment = factory(content.get("url", ""), body=body, info=content.get("info"))
         if isinstance(content.get("file"), dict):
             segment.data["file"] = dict(content["file"])
         return Message(segment)
-    if body:
-        return Message(MessageSegment.text(unescape(body)))
-    return Message(MessageSegment.raw(content))
+    if msgtype and msgtype not in MSGTYPE_SEGMENT_MAP:
+        # Unknown message types are preserved verbatim so they can be forwarded.
+        return Message(MessageSegment.raw(content, event_type="m.room.message"))
+    fallback = (
+        MessageSegment.text(unescape(body)) if body else MessageSegment.raw(content)
+    )
+    return Message(fallback)

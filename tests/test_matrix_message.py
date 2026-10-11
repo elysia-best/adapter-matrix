@@ -4,6 +4,7 @@ from nonebot.adapters.matrix.api.model import SyncResponse
 from nonebot.adapters.matrix.message import (
     Message,
     MessageSegment,
+    build_edit_content,
     build_message_content,
     message_from_content,
     parse_message,
@@ -100,6 +101,17 @@ def test_parse_text_notice_html_and_reply_content() -> None:
     assert html["format"] == "org.matrix.custom.html"
     assert html["formatted_body"] == "<strong>bold</strong>"
 
+    edited = build_edit_content(MessageSegment.text("changed"), "$old:example.org")
+    assert edited == {
+        "msgtype": "m.text",
+        "body": "* changed",
+        "m.new_content": {
+            "msgtype": "m.text",
+            "body": "changed",
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$old:example.org"},
+    }
+
 
 @pytest.mark.asyncio
 async def test_api_sync_parses_response() -> None:
@@ -137,3 +149,42 @@ def test_message_from_matrix_content() -> None:
     )
     assert image[0].type == "image"
     assert image[0].data["url"] == "mxc://example.org/pic"
+
+
+def test_sticker_message_segment_round_trip() -> None:
+    segment = MessageSegment.sticker(
+        "mxc://example.org/sticker",
+        body="sticker.webp",
+        content_type="image/webp",
+        info={"w": 128, "h": 128},
+    )
+    content = parse_message(segment)
+    assert content == {
+        "msgtype": "m.sticker",
+        "body": "sticker.webp",
+        "url": "mxc://example.org/sticker",
+        "info": {"w": 128, "h": 128},
+    }
+    restored = message_from_content(content)
+    assert restored[0].type == "sticker"
+    assert restored[0].data["url"] == "mxc://example.org/sticker"
+
+
+def test_location_message_keeps_raw_payload() -> None:
+    content = {
+        "msgtype": "m.location",
+        "body": "Office",
+        "geo_uri": "geo:37.786971,-122.399677",
+        "org.matrix.msc3488.location": {"description": "Office"},
+    }
+    message = message_from_content(content)
+    assert message[0].type == "raw"
+    assert message[0].data["content"] == content
+
+
+def test_unknown_message_type_becomes_raw() -> None:
+    content = {"msgtype": "m.custom", "body": "hi", "extra": 1}
+    message = message_from_content(content)
+    assert message[0].type == "raw"
+    assert message[0].data["content"] == content
+    assert message[0].data["event_type"] == "m.room.message"

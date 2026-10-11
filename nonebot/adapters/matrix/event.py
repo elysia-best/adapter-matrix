@@ -10,7 +10,7 @@ from pydantic import ConfigDict, Field, PrivateAttr
 
 from .api.model import RawMatrixEvent
 from .api.types import EventId, RoomId, UserId
-from .message import Message, message_from_content
+from .message import Message, MessageSegment, message_from_content
 
 EventType = Literal["message", "notice", "meta"]
 
@@ -115,6 +115,15 @@ class RoomMemberEvent(NoticeEvent):
         return value if isinstance(value, str) else None
 
     @override
+    def get_message(self) -> Message:
+        subject = str(self.state_key or self.sender or "")
+        displayname = self.content.get("displayname")
+        label = f"{displayname} ({subject})" if displayname else subject
+        return Message(
+            MessageSegment.text(f"{label} {self.membership or 'updated'}".strip())
+        )
+
+    @override
     def get_event_description(self) -> str:
         return (
             f"Member {self.state_key or self.sender or ''} "
@@ -138,9 +147,17 @@ class ReactionEvent(NoticeEvent):
         value = self.relates_to.get("key")
         return value if isinstance(value, str) else None
 
+    @override
+    def get_message(self) -> Message:
+        return Message(MessageSegment.text(self.key or ""))
+
 
 class RedactionEvent(NoticeEvent):
     redacts: EventId | None = None
+
+    @override
+    def get_message(self) -> Message:
+        return Message(MessageSegment.text(str(self.redacts or "")))
 
 
 class TypingEvent(NoticeEvent):
