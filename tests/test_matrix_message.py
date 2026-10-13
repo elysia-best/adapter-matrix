@@ -79,6 +79,24 @@ async def test_media_segment_uploads_before_send(dummy_bot: DummyBot) -> None:
     assert upload_request.content == b"image-bytes"
     assert payload["msgtype"] == "m.image"
     assert payload["url"] == "mxc://example.org/image"
+    assert payload["info"]["mimetype"] == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_video_and_webp_media_include_mimetypes(dummy_bot: DummyBot) -> None:
+    dummy_bot.adapter.content = b'{"content_uri":"mxc://example.org/media"}'
+
+    video = await build_message_content(
+        MessageSegment.video(b"video-bytes", filename="clip.mp4"), bot=dummy_bot
+    )
+    webp = await build_message_content(
+        MessageSegment.image(b"webp-bytes", filename="sticker.webp"), bot=dummy_bot
+    )
+
+    assert video["msgtype"] == "m.video"
+    assert video["info"]["mimetype"] == "video/mp4"
+    assert webp["msgtype"] == "m.image"
+    assert webp["info"]["mimetype"] == "image/webp"
 
 
 def test_parse_text_notice_html_and_reply_content() -> None:
@@ -163,7 +181,7 @@ def test_sticker_message_segment_round_trip() -> None:
         "msgtype": "m.sticker",
         "body": "sticker.webp",
         "url": "mxc://example.org/sticker",
-        "info": {"w": 128, "h": 128},
+        "info": {"w": 128, "h": 128, "mimetype": "image/webp"},
     }
     restored = message_from_content(content)
     assert restored[0].type == "sticker"

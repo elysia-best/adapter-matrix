@@ -77,6 +77,36 @@ def to_device_payloads(adapter: DummyAdapter) -> list[dict[str, Any]]:
 
 
 @pytest.mark.asyncio
+async def test_reactions_stay_plaintext_in_encrypted_rooms() -> None:
+    adapter, engine = make_engine()
+
+    async def encrypted_room(_room_id: str) -> dict[str, Any]:
+        return {"algorithm": MEGOLM_ALGORITHM}
+
+    engine.room_settings = encrypted_room
+    adapter.content = b'{"event_id":"$reaction:example.org"}'
+
+    response = await engine.send_room_event(
+        "!room:example.org",
+        "m.reaction",
+        {
+            "m.relates_to": {
+                "rel_type": "m.annotation",
+                "event_id": "$target:example.org",
+                "key": "👍",
+            }
+        },
+        "txn-reaction",
+    )
+
+    request = adapter.request_calls[-1]
+    assert response.event_id == "$reaction:example.org"
+    assert "/send/m.reaction/txn-reaction" in str(request.url)
+    assert request.json["m.relates_to"]["key"] == "👍"
+    await engine.close()
+
+
+@pytest.mark.asyncio
 async def test_share_room_skips_unclaimable_device() -> None:
     adapter, engine = make_engine()
     peer, peer_keys = make_device("@peer:example.org", "PEER")

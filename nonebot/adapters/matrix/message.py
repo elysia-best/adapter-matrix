@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+import mimetypes
 from typing import Any, Protocol, cast
 from typing_extensions import Self, override
 
@@ -19,6 +20,14 @@ from .utils import escape, log, unescape
 
 MATRIX_HTML_FORMAT = "org.matrix.custom.html"
 MEDIA_SEGMENT_TYPES = {"image", "file", "audio", "video", "sticker"}
+FALLBACK_MEDIA_TYPES = {
+    "avif": "image/avif",
+    "webp": "image/webp",
+    "m4v": "video/mp4",
+    "mkv": "video/x-matroska",
+    "mov": "video/quicktime",
+    "webm": "video/webm",
+}
 SEGMENT_MSGTYPE_MAP = {
     "text": "m.text",
     "notice": "m.notice",
@@ -273,6 +282,10 @@ def _media_segment(  # noqa: PLR0913
     )
     raw_content = content if isinstance(content, bytes) else None
     file_name = filename or body or (str(content).rsplit("/", 1)[-1] if url else None)
+    resolved_content_type = content_type or _guess_content_type(file_name)
+    media_info = dict(info or {})
+    if resolved_content_type and "mimetype" not in media_info:
+        media_info["mimetype"] = resolved_content_type
     return MediaSegment(
         segment_type,
         {
@@ -280,10 +293,20 @@ def _media_segment(  # noqa: PLR0913
             "url": url,
             "filename": file_name,
             "body": body or file_name or segment_type,
-            "content_type": content_type,
-            "info": info or {},
+            "content_type": resolved_content_type,
+            "info": media_info,
         },
     )
+
+
+def _guess_content_type(filename: str | None) -> str | None:
+    if not filename:
+        return None
+    guessed = mimetypes.guess_type(filename)[0]
+    if guessed:
+        return guessed
+    suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    return FALLBACK_MEDIA_TYPES.get(suffix)
 
 
 class Message(BaseMessage[MessageSegment]):

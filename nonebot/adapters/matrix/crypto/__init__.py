@@ -804,7 +804,10 @@ class CryptoEngine:
     ) -> Any:
         async with self._lock:
             settings = await self.room_settings(room_id)
-            if settings and event_type != "m.room.encrypted":
+            # Matrix reactions are intentionally sent as plaintext, including
+            # in encrypted rooms. This matches the Matrix SDK behavior and is
+            # required for clients to aggregate them as m.annotation events.
+            if settings and event_type not in {"m.room.encrypted", "m.reaction"}:
                 if not self.ready:
                     raise CryptoError("E2EE initialization has not completed")
                 await self.flush_requests()

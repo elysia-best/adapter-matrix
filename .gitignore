@@ -517,3 +517,4 @@ $RECYCLE.BIN/
 
 # Ignore multiple AI agent's local settings
 .claude/
+.workbuddy/
