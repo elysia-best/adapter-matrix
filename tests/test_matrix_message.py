@@ -17,22 +17,22 @@ import pytest
 
 
 def test_convert_message_from_api_json() -> None:
-    content = b'{"next_batch":"s7055362852_757284974_4340430_4776043867_5561134979_269490140_1633051276_11314874994_0_703827_34_1_1360266","device_one_time_keys_count":{"signed_curve25519":47},"device_unused_fallback_key_types":["signed_curve25519"],"rooms":{"join":{"!PPaIWnOCgdZmRMfpXH:matrix.debian.social":{"timeline":{"events":[{"unsigned":{"membership":"join"},"content":{"body":"<html><h1>\\u6807\\u9898</h1></html>","m.mentions":{},"msgtype":"m.text"},"origin_server_ts":1781085955184,"sender":"@qinyn:matrix.debian.social","type":"m.room.message","event_id":"$6Wjghb7JNLkT6wUEXT8lCoM9uIlNF-ULsH9xvo3LCvg"}],"prev_batch":"s7055362792_757284974_4340430_4776043867_5561134979_269490140_1633051276_11314874994_0_703827_34_1_1360266","limited":false},"state":{"events":[]},"account_data":{"events":[]},"ephemeral":{"events":[{"type":"m.typing","content":{"user_ids":[]}},{"type":"m.receipt","content":{"$Dd_jVxydeOyh3kDjAcM15gYGKMpI8B3sHuE4OAs5l6I":{"m.read":{"@qinyn:matrix.debian.social":{"thread_id":"main","ts":1781085951796},"@zinface:mozilla.org":{"thread_id":"main","ts":1781085951947}}}}}]},"unread_notifications":{"notification_count":19,"highlight_count":0},"summary":{}}}}}'
+    content = b'{"next_batch":"s123_456","device_one_time_keys_count":{"signed_curve25519":47},"device_unused_fallback_key_types":["signed_curve25519"],"rooms":{"join":{"!room:example.org":{"timeline":{"events":[{"unsigned":{"membership":"join"},"content":{"body":"<html><h1>\\u6807\\u9898</h1></html>","m.mentions":{},"msgtype":"m.text"},"origin_server_ts":1700000000000,"sender":"@alice:example.org","type":"m.room.message","event_id":"$event:example.org"}],"prev_batch":"s123_455","limited":false},"state":{"events":[]},"account_data":{"events":[]},"ephemeral":{"events":[{"type":"m.typing","content":{"user_ids":[]}},{"type":"m.receipt","content":{"$receipt:example.org":{"m.read":{"@alice:example.org":{"thread_id":"main","ts":1699999999000},"@bob:example.org":{"thread_id":"main","ts":1699999999500}}}}}]},"unread_notifications":{"notification_count":19,"highlight_count":0},"summary":{}}}}}'
 
     data = json.loads(content)
     sync = type_validate_python(SyncResponse, data)
 
-    assert sync.next_batch.startswith("s7055362852")
+    assert sync.next_batch.startswith("s123_456")
     assert sync.device_one_time_keys_count == {"signed_curve25519": 47}
 
-    room = sync.rooms.join["!PPaIWnOCgdZmRMfpXH:matrix.debian.social"]
+    room = sync.rooms.join["!room:example.org"]
     assert room.unread_notifications == {"notification_count": 19, "highlight_count": 0}
 
     event = room.timeline.events[0]
     assert event.type == "m.room.message"
-    assert event.event_id == "$6Wjghb7JNLkT6wUEXT8lCoM9uIlNF-ULsH9xvo3LCvg"
-    assert event.sender == "@qinyn:matrix.debian.social"
-    assert event.origin_server_ts == 1781085955184
+    assert event.event_id == "$event:example.org"
+    assert event.sender == "@alice:example.org"
+    assert event.origin_server_ts == 1700000000000
     assert event.content["msgtype"] == "m.text"
     # JSON \u escapes are decoded by json.loads into actual Unicode
     assert event.content["body"] == "<html><h1>标题</h1></html>"
@@ -218,7 +218,7 @@ def test_add_reply_fallback_to_message_payload() -> None:
 
 @pytest.mark.asyncio
 async def test_api_sync_parses_response() -> None:
-    content = b'{"next_batch":"s7055362852_757284974_4340430_4776043867_5561134979_269490140_1633051276_11314874994_0_703827_34_1_1360266","device_one_time_keys_count":{"signed_curve25519":47},"device_unused_fallback_key_types":["signed_curve25519"],"rooms":{"join":{"!PPaIWnOCgdZmRMfpXH:matrix.debian.social":{"timeline":{"events":[{"unsigned":{"membership":"join"},"content":{"body":"<html><h1>\\u6807\\u9898</h1></html>","m.mentions":{},"msgtype":"m.text"},"origin_server_ts":1781085955184,"sender":"@qinyn:matrix.debian.social","type":"m.room.message","event_id":"$6Wjghb7JNLkT6wUEXT8lCoM9uIlNF-ULsH9xvo3LCvg"}],"prev_batch":"s7055362792_757284974_4340430_4776043867_5561134979_269490140_1633051276_11314874994_0_703827_34_1_1360266","limited":false},"state":{"events":[]},"account_data":{"events":[]},"ephemeral":{"events":[{"type":"m.typing","content":{"user_ids":[]}},{"type":"m.receipt","content":{"$Dd_jVxydeOyh3kDjAcM15gYGKMpI8B3sHuE4OAs5l6I":{"m.read":{"@qinyn:matrix.debian.social":{"thread_id":"main","ts":1781085951796},"@zinface:mozilla.org":{"thread_id":"main","ts":1781085951947}}}}}]},"unread_notifications":{"notification_count":19,"highlight_count":0},"summary":{}}}}}'
+    content = b'{"next_batch":"s123_456","device_one_time_keys_count":{"signed_curve25519":47},"device_unused_fallback_key_types":["signed_curve25519"],"rooms":{"join":{"!room:example.org":{"timeline":{"events":[{"unsigned":{"membership":"join"},"content":{"body":"<html><h1>\\u6807\\u9898</h1></html>","m.mentions":{},"msgtype":"m.text"},"origin_server_ts":1700000000000,"sender":"@alice:example.org","type":"m.room.message","event_id":"$event:example.org"}],"prev_batch":"s123_455","limited":false},"state":{"events":[]},"account_data":{"events":[]},"ephemeral":{"events":[{"type":"m.typing","content":{"user_ids":[]}},{"type":"m.receipt","content":{"$receipt:example.org":{"m.read":{"@alice:example.org":{"thread_id":"main","ts":1699999999000},"@bob:example.org":{"thread_id":"main","ts":1699999999500}}}}}]},"unread_notifications":{"notification_count":19,"highlight_count":0},"summary":{}}}}}'
 
     adapter = DummyAdapter(content=content)
     bot = DummyBot(adapter=adapter)
@@ -231,13 +231,13 @@ async def test_api_sync_parses_response() -> None:
     assert str(adapter.request_calls[0].url).endswith("/_matrix/client/v3/sync")
 
     # Verify the response
-    assert sync.next_batch.startswith("s7055362852")
+    assert sync.next_batch.startswith("s123_456")
     assert sync.device_one_time_keys_count == {"signed_curve25519": 47}
 
-    room = sync.rooms.join["!PPaIWnOCgdZmRMfpXH:matrix.debian.social"]
+    room = sync.rooms.join["!room:example.org"]
     event = room.timeline.events[0]
     assert event.type == "m.room.message"
-    assert event.sender == "@qinyn:matrix.debian.social"
+    assert event.sender == "@alice:example.org"
     assert event.content["msgtype"] == "m.text"
     assert event.content["body"] == "<html><h1>标题</h1></html>"
 
@@ -277,7 +277,7 @@ def test_location_message_keeps_raw_payload() -> None:
     content = {
         "msgtype": "m.location",
         "body": "Office",
-        "geo_uri": "geo:37.786971,-122.399677",
+        "geo_uri": "geo:12.345678,23.456789",
         "org.matrix.msc3488.location": {"description": "Office"},
     }
     message = message_from_content(content)

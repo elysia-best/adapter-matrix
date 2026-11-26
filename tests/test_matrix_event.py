@@ -137,8 +137,8 @@ def test_room_message_event_escapes_html_tags_for_colored_logs() -> None:
     logger.opt(colors=True).success(log_string)
 
 
-def test_model_validate_from_real_api_response() -> None:
-    """Test that model_validate works on data from a real /sync API response.
+def test_model_validate_from_representative_api_response() -> None:
+    """Test that model_validate works on data from a representative /sync API response.
 
     This reproduces the exact path in _dispatch_room_event:
     1. Parse SyncResponse from raw JSON
@@ -148,10 +148,10 @@ def test_model_validate_from_real_api_response() -> None:
     """
     body = json.dumps(
         {
-            "next_batch": "m7055416435~37",
+            "next_batch": "m123_456",
             "rooms": {
                 "join": {
-                    "!PPaIWnOCgdZmRMfpXH:matrix.debian.social": {
+                    "!room:example.org": {
                         "timeline": {
                             "events": [
                                 {
@@ -161,13 +161,13 @@ def test_model_validate_from_real_api_response() -> None:
                                         "m.mentions": {},
                                         "msgtype": "m.text",
                                     },
-                                    "origin_server_ts": 1781087180630,
+                                    "origin_server_ts": 1700000000000,
                                     "sender": "@bob:example.com",
                                     "type": "m.room.message",
-                                    "event_id": "$ioCkmKP0FCHFezcIEZhjLTnzxwpnuGkP-Dseu736_hk",
+                                    "event_id": "$event:example.org",
                                 }
                             ],
-                            "prev_batch": "s7055416438",
+                            "prev_batch": "s123_455",
                             "limited": False,
                         },
                         "state": {"events": []},
@@ -186,20 +186,20 @@ def test_model_validate_from_real_api_response() -> None:
 
     # Step 1: Parse the full sync response
     sync = type_validate_python(SyncResponse, json.loads(body))
-    assert sync.next_batch == "m7055416435~37"
+    assert sync.next_batch == "m123_456"
 
     # Step 2: Extract the RawMatrixEvent from timeline
-    room = sync.rooms.join["!PPaIWnOCgdZmRMfpXH:matrix.debian.social"]
+    room = sync.rooms.join["!room:example.org"]
     raw = room.timeline.events[0]
     assert raw.type == "m.room.message"
-    assert raw.event_id == "$ioCkmKP0FCHFezcIEZhjLTnzxwpnuGkP-Dseu736_hk"
+    assert raw.event_id == "$event:example.org"
     assert raw.sender == "@bob:example.com"
     assert raw.unsigned is not None
     assert raw.unsigned.membership == "join"
 
     # Step 3: model_dump (exactly as in event_from_raw)
     data = raw.model_dump(by_alias=True, exclude_none=True)
-    data["room_id"] = "!PPaIWnOCgdZmRMfpXH:matrix.debian.social"
+    data["room_id"] = "!room:example.org"
     data["to_me"] = False
 
     # Step 4: model_validate (the line that was suspected to hang)
@@ -207,7 +207,7 @@ def test_model_validate_from_real_api_response() -> None:
 
     # Verify the result
     assert isinstance(event, RoomMessageEvent)
-    assert event.room_id == "!PPaIWnOCgdZmRMfpXH:matrix.debian.social"
+    assert event.room_id == "!room:example.org"
     assert event.sender == "@bob:example.com"
     assert event.content["msgtype"] == "m.text"
     assert event.to_me is False
@@ -216,13 +216,13 @@ def test_model_validate_from_real_api_response() -> None:
 
 
 def test_event_from_raw_via_full_pipeline() -> None:
-    """Test event_from_raw with raw event from real API response (unsigned present)."""
+    """Test event_from_raw with raw event from representative API response (unsigned present)."""
     body = json.dumps(
         {
-            "next_batch": "m7055416435~37",
+            "next_batch": "m123_456",
             "rooms": {
                 "join": {
-                    "!PPaIWnOCgdZmRMfpXH:matrix.debian.social": {
+                    "!room:example.org": {
                         "timeline": {
                             "events": [
                                 {
@@ -232,10 +232,10 @@ def test_event_from_raw_via_full_pipeline() -> None:
                                         "m.mentions": {},
                                         "msgtype": "m.text",
                                     },
-                                    "origin_server_ts": 1781087180630,
+                                    "origin_server_ts": 1700000000000,
                                     "sender": "@bob:example.com",
                                     "type": "m.room.message",
-                                    "event_id": "$ioCkmKP0FCHFezcIEZhjLTnzxwpnuGkP-Dseu736_hk",
+                                    "event_id": "$event:example.org",
                                 }
                             ],
                             "prev_batch": "s",
@@ -253,10 +253,10 @@ def test_event_from_raw_via_full_pipeline() -> None:
     )
 
     sync = type_validate_python(SyncResponse, json.loads(body))
-    raw = sync.rooms.join["!PPaIWnOCgdZmRMfpXH:matrix.debian.social"].timeline.events[0]
+    raw = sync.rooms.join["!room:example.org"].timeline.events[0]
 
     event = event_from_raw(
-        raw, room_id="!PPaIWnOCgdZmRMfpXH:matrix.debian.social", to_me=False
+        raw, room_id="!room:example.org", to_me=False
     )
 
     assert isinstance(event, RoomMessageEvent)
