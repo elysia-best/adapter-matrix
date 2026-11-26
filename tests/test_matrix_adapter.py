@@ -107,6 +107,19 @@ def test_to_me_detects_full_user_id_in_body(dummy_bot: DummyBot) -> None:
     assert dummy_bot.adapter._is_to_me(dummy_bot, raw, room_id="!room:example.org")
 
 
+def test_to_me_detects_room_mention(dummy_bot: DummyBot) -> None:
+    raw = RawMatrixEvent(
+        type="m.room.message",
+        content={
+            "msgtype": "m.text",
+            "body": "hello everyone",
+            "m.mentions": {"room": True},
+        },
+    )
+
+    assert dummy_bot.adapter._is_to_me(dummy_bot, raw, room_id="!room:example.org")
+
+
 @pytest.mark.asyncio
 async def test_dispatch_strips_standard_mention_before_command_parsing(
     dummy_bot: DummyBot,

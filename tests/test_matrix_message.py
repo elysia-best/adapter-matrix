@@ -64,6 +64,23 @@ async def test_text_and_mention_build_matrix_content(dummy_bot: DummyBot) -> Non
 
 
 @pytest.mark.asyncio
+async def test_room_mention_builds_matrix_content(dummy_bot: DummyBot) -> None:
+    dummy_bot.adapter.content = b'{"event_id":"$sent:example.org"}'
+    dummy_bot.adapter.responses = [(200, b"[]")]
+
+    await dummy_bot.send_to(
+        "!room:example.org",
+        Message([MessageSegment.mention_room(), MessageSegment.text(" hello")]),
+        txn_id="txn-room-mention",
+    )
+
+    request = dummy_bot.adapter.request_calls[-1]
+    assert request.json["body"] == "@room hello"
+    assert request.json["m.mentions"] == {"room": True}
+    assert request.json["formatted_body"] == "@room hello"
+
+
+@pytest.mark.asyncio
 async def test_send_reply_fetches_target_and_adds_fallback(
     dummy_bot: DummyBot,
 ) -> None:
@@ -151,6 +168,26 @@ def test_parse_text_notice_html_and_reply_content() -> None:
         "msgtype": "m.notice",
         "body": "heads up",
         "m.relates_to": {"m.in_reply_to": {"event_id": "$event:example.org"}},
+    }
+
+    room_mention = parse_message(
+        Message([MessageSegment.mention_room(), MessageSegment.text(" hello")])
+    )
+    assert room_mention["body"] == "@room hello"
+    assert room_mention["m.mentions"] == {"room": True}
+
+    combined_mentions = parse_message(
+        Message(
+            [
+                MessageSegment.mention_room(),
+                MessageSegment.text(" "),
+                MessageSegment.mention_user("@alice:example.org", "Alice"),
+            ]
+        )
+    )
+    assert combined_mentions["m.mentions"] == {
+        "room": True,
+        "user_ids": ["@alice:example.org"],
     }
 
     html = parse_message(MessageSegment.html("bold", "<strong>bold</strong>"))

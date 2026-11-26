@@ -93,6 +93,10 @@ class MessageSegment(BaseMessageSegment["Message"]):
         )
 
     @staticmethod
+    def mention_room() -> RoomMentionSegment:
+        return RoomMentionSegment("mention_room", {})
+
+    @staticmethod
     def reply(event_id: str | EventId) -> ReplySegment:
         return ReplySegment("reply", {"event_id": EventId(str(event_id))})
 
@@ -157,7 +161,14 @@ class MessageSegment(BaseMessageSegment["Message"]):
 
     @override
     def is_text(self) -> bool:
-        return self.type in {"text", "notice", "emote", "html", "mention_user"}
+        return self.type in {
+            "text",
+            "notice",
+            "emote",
+            "html",
+            "mention_user",
+            "mention_room",
+        }
 
     @classmethod
     @override
@@ -222,6 +233,13 @@ class MentionUserSegment(MessageSegment):
 
 
 @dataclass
+class RoomMentionSegment(MessageSegment):
+    @override
+    def __str__(self) -> str:
+        return "@room"
+
+
+@dataclass
 class ReplySegment(MessageSegment):
     @override
     def __str__(self) -> str:
@@ -262,6 +280,7 @@ SEGMENT_TYPE_MAP = {
     "emote": EmoteSegment,
     "html": HtmlSegment,
     "mention_user": MentionUserSegment,
+    "mention_room": RoomMentionSegment,
     "reply": ReplySegment,
     "image": MediaSegment,
     "file": MediaSegment,
@@ -472,6 +491,7 @@ def _build_message_payload(  # noqa: C901
     message_type: str | None = None
     has_html = False
     has_mention = False
+    mentions_room = False
 
     for segment in message:
         if segment.type in {"text", "notice", "emote"}:
@@ -493,6 +513,11 @@ def _build_message_payload(  # noqa: C901
             )
             mentions.add(user_id)
             has_mention = True
+        elif segment.type == "mention_room":
+            body_parts.append("@room")
+            formatted_parts.append("@room")
+            mentions_room = True
+            has_mention = True
         elif segment.type == "reply":
             reply_to = str(segment.data["event_id"])
         elif segment.type in MEDIA_SEGMENT_TYPES:
@@ -511,7 +536,12 @@ def _build_message_payload(  # noqa: C901
             content["url"] = media_segment.data["url"]
         if media_segment.data.get("info"):
             content["info"] = media_segment.data["info"]
-        _apply_relations(content, reply_to=reply_to, mentions=mentions)
+        _apply_relations(
+            content,
+            reply_to=reply_to,
+            mentions=mentions,
+            mentions_room=mentions_room,
+        )
         return content, media_segment
 
     body = "".join(body_parts)
@@ -519,7 +549,12 @@ def _build_message_payload(  # noqa: C901
     if has_html or has_mention:
         content["format"] = MATRIX_HTML_FORMAT
         content["formatted_body"] = "".join(formatted_parts)
-    _apply_relations(content, reply_to=reply_to, mentions=mentions)
+    _apply_relations(
+        content,
+        reply_to=reply_to,
+        mentions=mentions,
+        mentions_room=mentions_room,
+    )
     return content, None
 
 
@@ -565,11 +600,17 @@ def _apply_relations(
     *,
     reply_to: str | None,
     mentions: set[str],
+    mentions_room: bool = False,
 ) -> None:
     if reply_to:
         content["m.relates_to"] = {"m.in_reply_to": {"event_id": reply_to}}
-    if mentions:
-        content["m.mentions"] = {"user_ids": sorted(mentions)}
+    if mentions or mentions_room:
+        mention_content: dict[str, Any] = {}
+        if mentions:
+            mention_content["user_ids"] = sorted(mentions)
+        if mentions_room:
+            mention_content["room"] = True
+        content["m.mentions"] = mention_content
 
 
 def message_from_content(content: dict[str, Any]) -> Message:

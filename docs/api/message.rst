@@ -17,6 +17,7 @@ Matrix 适配器的消息系统由 :class:`MessageSegment` （消息段）和 :c
    - :meth:`MessageSegment.emote` — 表情动作（``m.emote``），如 ``/me 做了某事``。
    - :meth:`MessageSegment.html` — HTML 格式文本，需同时提供纯文本和格式化文本。
    - :meth:`MessageSegment.mention_user` — @ 提及用户，自动生成 ``m.mentions`` 和 Matrix.to 链接。
+   - :meth:`MessageSegment.mention_room` — @room 全房提及，设置 ``m.mentions.room``；是否实际通知全房由 Matrix 房间权限决定。
 
 媒体类消息段
    以下方法在传入 ``bytes`` 时会**自动上传**到 homeserver（需要 ``bot`` 实例）；传入 ``mxc://`` URI 则直接引用。

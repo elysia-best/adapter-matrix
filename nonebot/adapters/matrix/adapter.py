@@ -1035,6 +1035,8 @@ class Adapter(BaseAdapter, HandleMixin):
 
         mentions = raw.content.get("m.mentions")
         if isinstance(mentions, dict):
+            if mentions.get("room") is True:
+                return True
             user_ids = mentions.get("user_ids")
             if isinstance(user_ids, list) and bot.self_id in user_ids:
                 return True
