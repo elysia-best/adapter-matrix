@@ -86,6 +86,14 @@ class ApiClient:
     ) -> SyncResponse:
         """Long-poll Matrix sync and return room/account/ephemeral events."""
 
+    async def get_room_event(
+        self,
+        *,
+        room_id: RoomIdentifier,
+        event_id: EventId | str,
+    ) -> RawMatrixEvent:
+        """Fetch a room event by its event ID."""
+
     async def send_event(
         self,
         *,

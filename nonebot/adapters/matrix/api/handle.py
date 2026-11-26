@@ -297,6 +297,28 @@ class HandleMixin:
         )
         return type_validate_python(SyncResponse, data)
 
+    async def _api_get_room_event(
+        self: AdapterProtocol,
+        bot: Bot,
+        *,
+        room_id: RoomIdentifier,
+        event_id: EventId | str,
+    ) -> RawMatrixEvent:
+        """Fetch a room event by its event ID."""
+        data = await _request(
+            self,
+            bot.bot_info,
+            Request(
+                "GET",
+                self.client_url(
+                    bot.bot_info,
+                    f"/rooms/{quote_path(room_id)}/event/{quote_path(event_id)}",
+                ),
+                headers=_headers(self, bot.bot_info),
+            ),
+        )
+        return type_validate_python(RawMatrixEvent, data)
+
     async def _api_send_event(
         self: AdapterProtocol,
         bot: Bot,

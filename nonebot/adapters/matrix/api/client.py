@@ -40,6 +40,9 @@ class ApiClient:
     async def sync(self, **data: Any) -> Any:
         return await self._matrix_call("sync", **data)
 
+    async def get_room_event(self, **data: Any) -> Any:
+        return await self._matrix_call("get_room_event", **data)
+
     async def send_event(self, **data: Any) -> Any:
         return await self._matrix_call("send_event", **data)
 

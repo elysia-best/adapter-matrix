@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 import mimetypes
+import re
 from typing import Any, Protocol, cast
 from typing_extensions import Self, override
 
@@ -19,6 +20,10 @@ from .api.types import EventId, MxcUri, UserId
 from .utils import escape, log, unescape
 
 MATRIX_HTML_FORMAT = "org.matrix.custom.html"
+_REPLY_FALLBACK_RE = re.compile(
+    r"\A\s*<mx-reply\b[^>]*>.*?</mx-reply>\s*", re.IGNORECASE | re.DOTALL
+)
+_PLAIN_REPLY_FALLBACK_RE = re.compile(r"\A(?:>[^\r\n]*(?:\r?\n|\r))+\r?\n")
 MEDIA_SEGMENT_TYPES = {"image", "file", "audio", "video", "sticker"}
 FALLBACK_MEDIA_TYPES = {
     "avif": "image/avif",
@@ -346,6 +351,79 @@ def parse_message(message: str | BaseMessage | BaseMessageSegment) -> dict[str, 
     return _build_message_content(_ensure_message(message))
 
 
+def get_reply_event_id(
+    message: str | BaseMessage | BaseMessageSegment,
+) -> str | None:
+    for segment in _ensure_message(message):
+        if segment.type == "reply":
+            return str(segment.data["event_id"])
+    return None
+
+
+def add_reply_fallback(
+    content: dict[str, Any],
+    target: dict[str, Any],
+    *,
+    room_id: str,
+) -> dict[str, Any]:
+    """Add Matrix plain-text and HTML reply fallbacks to a message payload."""
+    target_content = target.get("content")
+    if target.get("type") != "m.room.message":
+        msg = "Reply target is not a room message"
+        raise _reply_error(msg)
+    if not isinstance(target_content, dict):
+        msg = "Reply target has no message content"
+        raise _reply_error(msg)
+    body = target_content.get("body")
+    sender = target.get("sender")
+    event_id = target.get("event_id")
+    if not isinstance(body, str) or not isinstance(sender, str):
+        msg = "Reply target is missing its sender or body"
+        raise _reply_error(msg)
+    if not isinstance(event_id, str):
+        msg = "Reply target is missing its event ID"
+        raise _reply_error(msg)
+    if is_reply_content(target_content):
+        body = strip_reply_fallback(body)
+    if not body:
+        msg = "Reply target has no quotable message body"
+        raise _reply_error(msg)
+
+    quote = "\n".join(
+        f"> <{sender}> {line}" if index == 0 else f"> {line}"
+        for index, line in enumerate(body.splitlines() or [body])
+    )
+    quote += "\n\n"
+    old_body = content.get("body", "")
+    if not isinstance(old_body, str):
+        msg = "Message body must be plain text"
+        raise _reply_error(msg)
+    content["body"] = quote + old_body
+
+    target_link = f"https://matrix.to/#/{escape(room_id)}/{escape(event_id)}"
+    sender_link = f"https://matrix.to/#/{escape(sender)}"
+    fallback_html = (
+        "<mx-reply><blockquote>"
+        f'<a href="{target_link}">In reply to</a> '
+        f'<a href="{sender_link}">{escape(sender)}</a><br>'
+        f"{escape(body)}"
+        "</blockquote></mx-reply>"
+    )
+    formatted_body = content.get("formatted_body")
+    if content.get("format") == MATRIX_HTML_FORMAT and isinstance(formatted_body, str):
+        content["formatted_body"] = fallback_html + formatted_body
+    else:
+        content["format"] = MATRIX_HTML_FORMAT
+        content["formatted_body"] = (
+            fallback_html + f"<p>{escape(old_body)}</p>" if old_body else fallback_html
+        )
+    return content
+
+
+def _reply_error(message: str) -> ValueError:
+    return ValueError(message)
+
+
 async def build_message_content(
     message: str | BaseMessage | BaseMessageSegment,
     *,
@@ -497,6 +575,14 @@ def _apply_relations(
 def message_from_content(content: dict[str, Any]) -> Message:
     msgtype = content.get("msgtype")
     body = content.get("body", "")
+    if is_reply_content(content):
+        body = strip_reply_fallback(body)
+        formatted_body = content.get("formatted_body")
+        if isinstance(formatted_body, str):
+            content = {
+                **content,
+                "formatted_body": strip_formatted_reply_fallback(formatted_body),
+            }
     if msgtype in {"m.text", "m.notice", "m.emote"}:
         if content.get("format") == MATRIX_HTML_FORMAT and content.get(
             "formatted_body"
@@ -526,3 +612,20 @@ def message_from_content(content: dict[str, Any]) -> Message:
         MessageSegment.text(unescape(body)) if body else MessageSegment.raw(content)
     )
     return Message(fallback)
+
+
+def is_reply_content(content: dict[str, Any]) -> bool:
+    relates_to = content.get("m.relates_to")
+    return isinstance(relates_to, dict) and isinstance(
+        relates_to.get("m.in_reply_to"), dict
+    )
+
+
+def strip_reply_fallback(body: str) -> str:
+    """Remove Matrix's plain-text reply fallback when it is at the start."""
+    return _PLAIN_REPLY_FALLBACK_RE.sub("", body, count=1)
+
+
+def strip_formatted_reply_fallback(body: str) -> str:
+    """Remove an Element-style ``<mx-reply>`` fallback at the start."""
+    return _REPLY_FALLBACK_RE.sub("", body, count=1)

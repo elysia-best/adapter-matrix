@@ -92,9 +92,7 @@ def test_to_me_does_not_infer_localpart_mention(
         content={"msgtype": "m.text", "body": "bot: /echo 123"},
     )
 
-    assert not dummy_bot.adapter._is_to_me(
-        dummy_bot, raw, room_id="!room:example.org"
-    )
+    assert not dummy_bot.adapter._is_to_me(dummy_bot, raw, room_id="!room:example.org")
 
 
 def test_to_me_detects_full_user_id_in_body(dummy_bot: DummyBot) -> None:
@@ -143,6 +141,22 @@ def test_to_me_detects_command_prefix_when_configured(dummy_bot: DummyBot) -> No
     raw = RawMatrixEvent(
         type="m.room.message",
         content={"msgtype": "m.text", "body": "/echo 123"},
+    )
+
+    assert dummy_bot.adapter._is_to_me(dummy_bot, raw, room_id="!room:example.org")
+
+
+def test_to_me_detects_command_after_reply_fallback_when_configured(
+    dummy_bot: DummyBot,
+) -> None:
+    dummy_bot.adapter.matrix_config.matrix_command_to_me = True
+    raw = RawMatrixEvent(
+        type="m.room.message",
+        content={
+            "msgtype": "m.text",
+            "body": "> <@alice:example.org> quoted\n\n/echo 123",
+            "m.relates_to": {"m.in_reply_to": {"event_id": "$target:example.org"}},
+        },
     )
 
     assert dummy_bot.adapter._is_to_me(dummy_bot, raw, room_id="!room:example.org")

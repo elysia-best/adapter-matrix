@@ -44,6 +44,7 @@ from .exception import (
     RateLimitException,
     UnauthorizedException,
 )
+from .message import is_reply_content, strip_reply_fallback
 from .oauth import (
     AuthorizationRequest,
     ClientRegistrationRequest,
@@ -1042,6 +1043,8 @@ class Adapter(BaseAdapter, HandleMixin):
         if not isinstance(body, str):
             return False
 
+        if is_reply_content(raw.content):
+            body = strip_reply_fallback(body)
         body = body.lstrip()
         if self.matrix_config.matrix_command_to_me:
             command_start = get_driver().config.command_start

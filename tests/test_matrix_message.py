@@ -4,6 +4,7 @@ from nonebot.adapters.matrix.api.model import SyncResponse
 from nonebot.adapters.matrix.message import (
     Message,
     MessageSegment,
+    add_reply_fallback,
     build_edit_content,
     build_message_content,
     message_from_content,
@@ -60,6 +61,43 @@ async def test_text_and_mention_build_matrix_content(dummy_bot: DummyBot) -> Non
     assert request.json["format"] == "org.matrix.custom.html"
     assert request.json["m.mentions"] == {"user_ids": ["@alice:example.org"]}
     assert response.event_id == "$sent:example.org"
+
+
+@pytest.mark.asyncio
+async def test_send_reply_fetches_target_and_adds_fallback(
+    dummy_bot: DummyBot,
+) -> None:
+    room_id = "!room:example.org"
+    dummy_bot._encryption_states[room_id] = None
+    dummy_bot.adapter.responses = [
+        (
+            200,
+            b'{"type":"m.room.message","event_id":"$target:example.org",'
+            b'"sender":"@alice:example.org","content":{"msgtype":"m.text",'
+            b'"body":"quoted"}}',
+        ),
+        (200, b'{"event_id":"$sent:example.org"}'),
+    ]
+
+    await dummy_bot.send_to(
+        room_id,
+        Message(
+            [MessageSegment.reply("$target:example.org"), MessageSegment.text("answer")]
+        ),
+        txn_id="txn-reply",
+    )
+
+    target_request, send_request = dummy_bot.adapter.request_calls[-2:]
+    assert target_request.method == "GET"
+    assert target_request.url.raw_path.endswith(
+        "/rooms/%21room%3Aexample.org/event/%24target%3Aexample.org"
+    )
+    assert send_request.json["body"] == "> <@alice:example.org> quoted\n\nanswer"
+    assert "<mx-reply>" in send_request.json["formatted_body"]
+    assert (
+        send_request.json["m.relates_to"]["m.in_reply_to"]["event_id"]
+        == "$target:example.org"
+    )
 
 
 @pytest.mark.asyncio
@@ -129,6 +167,53 @@ def test_parse_text_notice_html_and_reply_content() -> None:
         },
         "m.relates_to": {"rel_type": "m.replace", "event_id": "$old:example.org"},
     }
+
+
+def test_message_from_content_strips_reply_fallbacks() -> None:
+    content = {
+        "msgtype": "m.text",
+        "body": "> <@alice:example.org> old text\n\n.zssm",
+        "format": "org.matrix.custom.html",
+        "formatted_body": (
+            "<mx-reply><blockquote>quoted</blockquote></mx-reply><p>.zssm</p>"
+        ),
+        "m.relates_to": {"m.in_reply_to": {"event_id": "$event:example.org"}},
+    }
+
+    message = message_from_content(content)
+
+    assert message.extract_plain_text() == ".zssm"
+    assert message[0].data["body"] == ".zssm"
+    assert message[0].data["formatted_body"] == "<p>.zssm</p>"
+
+
+def test_reply_without_relation_keeps_fallback_text() -> None:
+    message = message_from_content({"msgtype": "m.text", "body": "> quoted\n\ntext"})
+
+    assert message.extract_plain_text() == "> quoted\n\ntext"
+
+
+def test_add_reply_fallback_to_message_payload() -> None:
+    content = {
+        "msgtype": "m.text",
+        "body": "reply",
+        "m.relates_to": {"m.in_reply_to": {"event_id": "$target:example.org"}},
+    }
+    target = {
+        "type": "m.room.message",
+        "event_id": "$target:example.org",
+        "sender": "@alice:example.org",
+        "content": {"msgtype": "m.text", "body": "quoted <text>"},
+    }
+
+    add_reply_fallback(content, target, room_id="!room:example.org")
+
+    assert content["body"] == ("> <@alice:example.org> quoted <text>\n\nreply")
+    assert content["m.relates_to"] == {
+        "m.in_reply_to": {"event_id": "$target:example.org"}
+    }
+    assert "<mx-reply>" in content["formatted_body"]
+    assert "quoted &lt;text&gt;" in content["formatted_body"]
 
 
 @pytest.mark.asyncio

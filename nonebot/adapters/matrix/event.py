@@ -209,6 +209,15 @@ def event_from_raw(
     data = raw.model_dump(by_alias=True, exclude_none=True)
     if room_id is not None and data.get("room_id") is None:
         data["room_id"] = str(room_id)
+    if raw.type == "m.room.message":
+        relates_to = raw.content.get("m.relates_to")
+        in_reply_to = (
+            relates_to.get("m.in_reply_to") if isinstance(relates_to, dict) else None
+        )
+        if isinstance(in_reply_to, dict) and isinstance(
+            in_reply_to.get("event_id"), str
+        ):
+            data["reply"] = in_reply_to["event_id"]
     data["to_me"] = to_me
     event_class = event_classes.get(raw.type, UnknownRoomEvent)
     return event_class.model_validate(data)

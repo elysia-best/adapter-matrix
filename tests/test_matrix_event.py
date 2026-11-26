@@ -32,6 +32,23 @@ def test_room_message_event_converts_message_and_session() -> None:
     assert event.is_tome()
 
 
+def test_room_message_event_exposes_reply_target() -> None:
+    event = event_from_raw(
+        RawMatrixEvent(
+            type="m.room.message",
+            content={
+                "msgtype": "m.text",
+                "body": "> <@alice:example.org> quoted\n\nreply",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$target:example.org"}},
+            },
+        )
+    )
+
+    assert isinstance(event, RoomMessageEvent)
+    assert event.reply == "$target:example.org"
+    assert event.get_message().extract_plain_text() == "reply"
+
+
 def test_notice_event_variants() -> None:
     member = event_from_raw(
         RawMatrixEvent(

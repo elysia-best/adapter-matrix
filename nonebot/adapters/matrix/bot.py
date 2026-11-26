@@ -27,7 +27,7 @@ from .crypto.attachments import encrypt_attachment
 from .crypto.primitives import MEGOLM_ALGORITHM
 from .crypto.types import CryptoError
 from .event import Event, MessageEvent
-from .message import build_message_content
+from .message import add_reply_fallback, build_message_content, get_reply_event_id
 from .room import Room
 
 if TYPE_CHECKING:
@@ -117,8 +117,26 @@ class Bot(BaseBot, ApiClient):
         if settings and settings.get("algorithm") != MEGOLM_ALGORITHM:
             msg = "Unsupported room encryption algorithm"
             raise CryptoError(msg)
+        reply_event_id = get_reply_event_id(message)
+        target = None
+        if reply_event_id is not None:
+            target = await self.get_room_event(room_id=room_id, event_id=reply_event_id)
+            if target.type == "m.room.encrypted":
+                if self.crypto is None:
+                    msg = "Cannot build reply fallback for an encrypted event"
+                    raise CryptoError(msg)
+                target = await self.crypto.decrypt_room_event(
+                    target, room_id=str(room_id)
+                )
+                if target is None:
+                    msg = "Cannot decrypt the reply target event"
+                    raise CryptoError(msg)
         uploader = _RoomMediaUploader(self, encrypted=bool(settings))
         content = await build_message_content(message, bot=uploader)
+        if target is not None:
+            add_reply_fallback(
+                content, target.model_dump(mode="json"), room_id=str(room_id)
+            )
         return await self.send_event(
             room_id=room_id, event_type="m.room.message", txn_id=txn_id, content=content
         )
