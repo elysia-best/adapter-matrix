@@ -25,6 +25,7 @@ _REPLY_FALLBACK_RE = re.compile(
 )
 _PLAIN_REPLY_FALLBACK_RE = re.compile(r"\A(?:>[^\r\n]*(?:\r?\n|\r))+\r?\n")
 MEDIA_SEGMENT_TYPES = {"image", "file", "audio", "video", "sticker"}
+VOICE_SEGMENT_TYPE = "voice"
 FALLBACK_MEDIA_TYPES = {
     "avif": "image/avif",
     "webp": "image/webp",
@@ -132,6 +133,24 @@ class MessageSegment(BaseMessageSegment["Message"]):
         info: dict[str, Any] | None = None,
     ) -> MediaSegment:
         return _media_segment("audio", content, filename, body, content_type, info)
+
+    @staticmethod
+    def voice(  # noqa: PLR0913
+        content: bytes | str | MxcUri,
+        *,
+        duration: int | None = None,
+        waveform: list[float] | None = None,
+        filename: str = "Voice message.ogg",
+        body: str = "Voice message",
+        content_type: str = "audio/ogg",
+        info: dict[str, Any] | None = None,
+    ) -> MediaSegment:
+        segment = _media_segment(
+            VOICE_SEGMENT_TYPE, content, filename, body, content_type, info
+        )
+        segment.data["duration"] = duration
+        segment.data["waveform"] = list(waveform) if waveform is not None else None
+        return segment
 
     @staticmethod
     def video(
@@ -287,6 +306,7 @@ SEGMENT_TYPE_MAP = {
     "audio": MediaSegment,
     "video": MediaSegment,
     "sticker": MediaSegment,
+    VOICE_SEGMENT_TYPE: MediaSegment,
     "raw": RawSegment,
 }
 
@@ -477,10 +497,13 @@ async def _build_message_content_async(
     content, media_segment = _build_message_payload(message)
     if media_segment is None:
         return content
-    return await _materialize_media_content(content, media_segment, bot=bot)
+    content = await _materialize_media_content(content, media_segment, bot=bot)
+    if media_segment.type == VOICE_SEGMENT_TYPE:
+        _add_voice_message_fields(content, media_segment)
+    return content
 
 
-def _build_message_payload(  # noqa: C901
+def _build_message_payload(  # noqa: C901, PLR0912, PLR0915
     message: Message,
 ) -> tuple[dict[str, Any], MessageSegment | None]:
     body_parts: list[str] = []
@@ -520,14 +543,19 @@ def _build_message_payload(  # noqa: C901
             has_mention = True
         elif segment.type == "reply":
             reply_to = str(segment.data["event_id"])
-        elif segment.type in MEDIA_SEGMENT_TYPES:
+        elif segment.type in MEDIA_SEGMENT_TYPES | {VOICE_SEGMENT_TYPE}:
             media_segment = segment
         elif segment.type == "raw":
             return dict(segment.data["content"]), None
 
     if media_segment is not None:
+        msgtype = (
+            "m.audio"
+            if media_segment.type == VOICE_SEGMENT_TYPE
+            else SEGMENT_MSGTYPE_MAP[media_segment.type]
+        )
         content = {
-            "msgtype": SEGMENT_MSGTYPE_MAP[media_segment.type],
+            "msgtype": msgtype,
             "body": media_segment.data.get("body")
             or media_segment.data.get("filename")
             or media_segment.type,
@@ -542,6 +570,8 @@ def _build_message_payload(  # noqa: C901
             mentions=mentions,
             mentions_room=mentions_room,
         )
+        if media_segment.type == VOICE_SEGMENT_TYPE:
+            _add_voice_message_fields(content, media_segment)
         return content, media_segment
 
     body = "".join(body_parts)
@@ -556,6 +586,43 @@ def _build_message_payload(  # noqa: C901
         mentions_room=mentions_room,
     )
     return content, None
+
+
+def _add_voice_message_fields(content: dict[str, Any], segment: MessageSegment) -> None:
+    """Add MSC1767 audio blocks and the MSC3245 voice marker."""
+    info = dict(content.get("info") or {})
+    duration = segment.data.get("duration")
+    waveform = segment.data.get("waveform")
+    if duration is not None:
+        info["duration"] = duration
+    media_bytes = segment.data.get("content")
+    if isinstance(media_bytes, bytes):
+        info["size"] = len(media_bytes)
+    content["info"] = info
+
+    file_block: dict[str, Any] = {
+        "name": segment.data.get("filename") or "Voice message.ogg",
+        "mimetype": info.get("mimetype") or "audio/ogg",
+    }
+    if "size" in info:
+        file_block["size"] = info["size"]
+    if isinstance(content.get("url"), str):
+        file_block["url"] = content["url"]
+    if isinstance(content.get("file"), dict):
+        file_block.pop("url", None)
+        file_block["file"] = content["file"]
+
+    content["org.matrix.msc1767.file"] = file_block
+    content["org.matrix.msc1767.text"] = content.get("body", "Voice message")
+    content["org.matrix.msc3245.voice"] = {}
+
+    if duration is not None and waveform is not None:
+        content["org.matrix.msc1767.audio"] = {
+            "duration": duration,
+            "waveform": [
+                int(max(0.0, min(float(value), 1.0)) * 1024) for value in waveform
+            ],
+        }
 
 
 async def _materialize_media_content(

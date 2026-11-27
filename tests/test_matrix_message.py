@@ -154,6 +154,57 @@ async def test_video_and_webp_media_include_mimetypes(dummy_bot: DummyBot) -> No
     assert webp["info"]["mimetype"] == "image/webp"
 
 
+@pytest.mark.asyncio
+async def test_voice_message_uploads_and_builds_matrix_voice_payload(
+    dummy_bot: DummyBot,
+) -> None:
+    dummy_bot.adapter.content = b'{"content_uri":"mxc://example.org/voice"}'
+    payload = await build_message_content(
+        MessageSegment.voice(
+            b"voice-bytes",
+            duration=952,
+            waveform=[0.0, 0.5, 1.0, -0.1, 1.2],
+        ),
+        bot=dummy_bot,
+    )
+
+    upload_request = dummy_bot.adapter.request_calls[-1]
+    assert upload_request.content == b"voice-bytes"
+    assert payload == {
+        "msgtype": "m.audio",
+        "body": "Voice message",
+        "url": "mxc://example.org/voice",
+        "info": {
+            "mimetype": "audio/ogg",
+            "duration": 952,
+            "size": len(b"voice-bytes"),
+        },
+        "org.matrix.msc1767.file": {
+            "name": "Voice message.ogg",
+            "mimetype": "audio/ogg",
+            "size": len(b"voice-bytes"),
+            "url": "mxc://example.org/voice",
+        },
+        "org.matrix.msc1767.text": "Voice message",
+        "org.matrix.msc3245.voice": {},
+        "org.matrix.msc1767.audio": {
+            "duration": 952,
+            "waveform": [0, 512, 1024, 0, 1024],
+        },
+    }
+
+
+def test_voice_message_can_reference_existing_mxc_uri() -> None:
+    payload = parse_message(
+        MessageSegment.voice("mxc://example.org/voice", duration=1234)
+    )
+
+    assert payload["msgtype"] == "m.audio"
+    assert payload["url"] == "mxc://example.org/voice"
+    assert payload["org.matrix.msc3245.voice"] == {}
+    assert "org.matrix.msc1767.audio" not in payload
+
+
 def test_parse_text_notice_html_and_reply_content() -> None:
     payload = parse_message(
         Message(

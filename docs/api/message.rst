@@ -25,6 +25,7 @@ Matrix 适配器的消息系统由 :class:`MessageSegment` （消息段）和 :c
    - :meth:`MessageSegment.image` — 图片（``m.image``）。
    - :meth:`MessageSegment.file` — 文件（``m.file``）。
    - :meth:`MessageSegment.audio` — 音频（``m.audio``）。
+   - :meth:`MessageSegment.voice` — Element 兼容语音消息（``m.audio``，包含 MSC1767/MSC3245 字段）。
    - :meth:`MessageSegment.video` — 视频（``m.video``）。
 
    公共参数：
