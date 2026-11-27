@@ -27,7 +27,10 @@ Matrix adapter 使用 Client-Server API 与 homeserver 通信，需要可发起 
 
 ```dotenv
 DRIVER=~httpx
+MATRIX_LOG_LEVEL=INFO
 ```
+
+将 ``MATRIX_LOG_LEVEL`` 设置为 ``DEBUG`` 时，Matrix 同步错误日志会包含完整 traceback；默认 ``INFO`` 仅显示异常类型和消息。
 
 ### 三种启动模式
 

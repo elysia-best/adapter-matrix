@@ -17,7 +17,20 @@ else:
         | None
     )
 
-log = logger_wrapper("Matrix")
+
+_logger = logger_wrapper("Matrix")
+_log_level = "INFO"
+
+
+def configure_log_level(level: str) -> None:
+    global _log_level  # noqa: PLW0603
+    _log_level = level
+
+
+def log(level: str, message: str, exception: Exception | None = None) -> None:
+    if level == "ERROR" and _log_level != "DEBUG":
+        exception = None
+    _logger(level, message, exception)
 
 
 def omit_unset(data: Any) -> Any:  # noqa: ANN401

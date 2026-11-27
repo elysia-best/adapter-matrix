@@ -77,6 +77,9 @@ class BotInfo(BaseModel):
 
 
 class Config(BaseModel):
+    matrix_log_level: Literal[
+        "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
+    ] = "INFO"
     matrix_bots: list[BotInfo] = Field(default_factory=list)
     matrix_api_timeout: float = 30.0
     matrix_sync_timeout: int = 30000

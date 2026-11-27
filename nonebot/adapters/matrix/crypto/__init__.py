@@ -156,8 +156,8 @@ class CryptoEngine:
 
     def _event_done(self, task: asyncio.Task[Any]) -> None:
         self._tasks.discard(task)
-        if not task.cancelled() and task.exception() is not None:
-            log("ERROR", f"E2EE plugin event handler failed: {task.exception()}")
+        if not task.cancelled() and (exception := task.exception()) is not None:
+            log("ERROR", f"E2EE plugin event handler failed: {exception}", exception)
 
     async def request(
         self,

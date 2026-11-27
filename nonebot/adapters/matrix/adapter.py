@@ -10,7 +10,6 @@ import json
 from pathlib import Path
 import sys
 from time import time
-import traceback
 from typing import Any
 from typing_extensions import override
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -62,7 +61,7 @@ from .oauth import (
     refresh_oauth_token,
     register_oauth_client,
 )
-from .utils import log
+from .utils import configure_log_level, log
 
 CLIENT_API_PREFIX = "/_matrix/client/v3"
 MEDIA_API_PREFIX = "/_matrix/media/v3"
@@ -89,6 +88,7 @@ class Adapter(BaseAdapter, HandleMixin):
     def __init__(self, driver: Driver, **kwargs: Any) -> None:
         super().__init__(driver, **kwargs)
         self.matrix_config: Config = get_plugin_config(Config)
+        configure_log_level(self.matrix_config.matrix_log_level)
         self.tasks: set[asyncio.Task[None]] = set()
         self._token_lifetimes_ms: dict[str, int] = {}
         self.setup()
@@ -167,6 +167,7 @@ class Adapter(BaseAdapter, HandleMixin):
             log(
                 "ERROR",
                 f"Failed to read Matrix token store {path}: {type(e).__name__}: {e}",
+                e,
             )
             return {}
         if isinstance(raw, dict):
@@ -237,6 +238,7 @@ class Adapter(BaseAdapter, HandleMixin):
             log(
                 "ERROR",
                 f"Failed to write Matrix token store {path}: {type(e).__name__}: {e}",
+                e,
             )
             with contextlib.suppress(OSError):
                 temp_path.unlink(missing_ok=True)
@@ -594,22 +596,25 @@ class Adapter(BaseAdapter, HandleMixin):
                     "ERROR",
                     f"Token refresh rejected (4xx) for {bot.self_id}: "
                     f"{type(refresh_error).__name__}: {refresh_error}",
+                    refresh_error,
                 )
                 if refresh_error.soft_logout:
                     self_info = await self._relogin_if_soft_logout(bot)
                     if self_info is not None:
                         return True
-            except NetworkError:
+            except NetworkError as refresh_error:
                 log(
                     "ERROR",
                     f"Token refresh network error for {bot.self_id}; "
                     "keeping existing refresh token for retry",
+                    refresh_error,
                 )
             except Exception as refresh_error:
                 log(
                     "ERROR",
                     f"Failed to refresh Matrix access token for {bot.self_id}: "
                     f"{type(refresh_error).__name__}: {refresh_error}",
+                    refresh_error,
                 )
             else:
                 log(
@@ -703,6 +708,7 @@ class Adapter(BaseAdapter, HandleMixin):
                 log(
                     "ERROR",
                     f"OAuth2 login failed: {type(oauth_err).__name__}: {oauth_err}",
+                    oauth_err,
                 )
                 raise
             self._apply_token_update(
@@ -756,8 +762,8 @@ class Adapter(BaseAdapter, HandleMixin):
             except Exception as e:
                 log(
                     "ERROR",
-                    f"Matrix bot loop failed; retrying...  {type(e).__name__}: {e}\n"
-                    f"{traceback.format_exc()}",
+                    f"Matrix bot loop failed; retrying...  {type(e).__name__}: {e}",
+                    e,
                 )
                 await asyncio.sleep(self.matrix_config.matrix_retry_interval)
             finally:
@@ -815,7 +821,9 @@ class Adapter(BaseAdapter, HandleMixin):
                     continue
                 log(
                     "ERROR",
-                    f"Error while syncing Matrix bot {bot.self_id}: {type(e).__name__}: {e}",
+                    f"Error while syncing Matrix bot {bot.self_id}: "
+                    f"{type(e).__name__}: {e}",
+                    e,
                 )
                 await asyncio.sleep(self.matrix_config.matrix_retry_interval)
             except asyncio.CancelledError:
@@ -824,7 +832,8 @@ class Adapter(BaseAdapter, HandleMixin):
                 log(
                     "ERROR",
                     f"Error while syncing Matrix bot {bot.self_id}: "
-                    f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
+                    f"{type(e).__name__}: {e}",
+                    e,
                 )
                 await asyncio.sleep(self.matrix_config.matrix_retry_interval)
 
@@ -924,6 +933,7 @@ class Adapter(BaseAdapter, HandleMixin):
                 log(
                     "ERROR",
                     f"Failed to auto-join room {room_id}: {type(e).__name__}: {e}",
+                    e,
                 )
 
     async def _handle_left_room(

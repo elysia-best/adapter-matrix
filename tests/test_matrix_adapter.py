@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from time import time
 
+from nonebot.adapters.matrix import utils
 from nonebot.adapters.matrix.api.model import RawMatrixEvent
 from nonebot.adapters.matrix.config import BotInfo, Config
 from nonebot.adapters.matrix.event import Event
@@ -82,6 +83,31 @@ async def test_dispatch_room_event_handles_old_events_when_configured(
 
 def test_old_event_handling_is_disabled_by_default() -> None:
     assert Config().matrix_handle_old_events is False
+    assert Config().matrix_log_level == "INFO"
+
+
+@pytest.mark.parametrize(
+    ("level", "expected_exception"),
+    [("INFO", None), ("DEBUG", "same")],
+)
+def test_log_includes_exception_only_in_debug(
+    monkeypatch: pytest.MonkeyPatch,
+    level: str,
+    expected_exception: str | None,
+) -> None:
+    logged: list[tuple[str, str, Exception | None]] = []
+    monkeypatch.setattr(utils, "_logger", lambda *args: logged.append(args))
+    monkeypatch.setattr(utils, "_log_level", "INFO")
+    utils.configure_log_level(level)
+    exception = RuntimeError("failure")
+
+    utils.log("ERROR", "request failed", exception)
+
+    assert len(logged) == 1
+    if expected_exception == "same":
+        assert logged[0][2] is exception
+    else:
+        assert logged[0][2] is None
 
 
 def test_to_me_does_not_infer_localpart_mention(
