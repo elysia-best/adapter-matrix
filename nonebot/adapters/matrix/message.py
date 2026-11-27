@@ -680,7 +680,7 @@ def _apply_relations(
         content["m.mentions"] = mention_content
 
 
-def message_from_content(content: dict[str, Any]) -> Message:
+def message_from_content(content: dict[str, Any]) -> Message:  # noqa: PLR0911
     msgtype = content.get("msgtype")
     body = content.get("body", "")
     if is_reply_content(content):
@@ -707,6 +707,10 @@ def message_from_content(content: dict[str, Any]) -> Message:
     if msgtype == "m.location":
         return Message(MessageSegment.raw(content, event_type="m.room.message"))
     if msgtype in {"m.image", "m.file", "m.audio", "m.video", "m.sticker"}:
+        if msgtype == "m.audio" and isinstance(
+            content.get("org.matrix.msc3245.voice"), dict
+        ):
+            return Message(_voice_segment_from_content(content, body))
         segment_type = MSGTYPE_SEGMENT_MAP[msgtype]
         factory = getattr(MessageSegment, segment_type)
         segment = factory(content.get("url", ""), body=body, info=content.get("info"))
@@ -720,6 +724,44 @@ def message_from_content(content: dict[str, Any]) -> Message:
         MessageSegment.text(unescape(body)) if body else MessageSegment.raw(content)
     )
     return Message(fallback)
+
+
+def _voice_segment_from_content(content: dict[str, Any], body: object) -> MediaSegment:
+    voice_file = content.get("org.matrix.msc1767.file")
+    voice_file = voice_file if isinstance(voice_file, dict) else {}
+    voice_audio = content.get("org.matrix.msc1767.audio")
+    voice_audio = voice_audio if isinstance(voice_audio, dict) else {}
+    info = content.get("info")
+    info = dict(info) if isinstance(info, dict) else {}
+
+    filename = voice_file.get("name")
+    if not isinstance(filename, str):
+        filename = "Voice message.ogg"
+    content_type = voice_file.get("mimetype") or info.get("mimetype") or "audio/ogg"
+    duration = voice_audio.get("duration", info.get("duration"))
+    waveform = voice_audio.get("waveform")
+    if isinstance(waveform, list):
+        try:
+            waveform = [max(0, min(int(value), 1024)) / 1024 for value in waveform]
+        except (TypeError, ValueError, OverflowError):
+            waveform = None
+    else:
+        waveform = None
+
+    uri = content.get("url") or voice_file.get("url") or ""
+    segment = MessageSegment.voice(
+        uri,
+        duration=duration if isinstance(duration, int) else None,
+        waveform=waveform,
+        filename=filename,
+        body=body if isinstance(body, str) else "Voice message",
+        content_type=str(content_type),
+        info=info,
+    )
+    encrypted_file = voice_file.get("file") or content.get("file")
+    if isinstance(encrypted_file, dict):
+        segment.data["file"] = dict(encrypted_file)
+    return segment
 
 
 def is_reply_content(content: dict[str, Any]) -> bool:

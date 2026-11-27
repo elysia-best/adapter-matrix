@@ -205,6 +205,78 @@ def test_voice_message_can_reference_existing_mxc_uri() -> None:
     assert "org.matrix.msc1767.audio" not in payload
 
 
+def test_message_from_content_restores_voice_message_metadata() -> None:
+    message = message_from_content(
+        {
+            "msgtype": "m.audio",
+            "body": "Voice message",
+            "url": "mxc://matrix.debian.social/gYkWMWpNZjnXHzvxpmeuZjyz",
+            "info": {"duration": 952, "mimetype": "audio/ogg", "size": 1396},
+            "org.matrix.msc1767.audio": {
+                "duration": 952,
+                "waveform": [0, 512, 1024],
+            },
+            "org.matrix.msc1767.file": {
+                "name": "Voice message.ogg",
+                "mimetype": "audio/ogg",
+                "size": 1396,
+                "url": "mxc://matrix.debian.social/gYkWMWpNZjnXHzvxpmeuZjyz",
+            },
+            "org.matrix.msc1767.text": "Voice message",
+            "org.matrix.msc3245.voice": {},
+        }
+    )
+
+    assert len(message) == 1
+    segment = message[0]
+    assert segment.type == "voice"
+    assert segment.data["url"] == "mxc://matrix.debian.social/gYkWMWpNZjnXHzvxpmeuZjyz"
+    assert segment.data["filename"] == "Voice message.ogg"
+    assert segment.data["body"] == "Voice message"
+    assert segment.data["duration"] == 952
+    assert segment.data["waveform"] == [0.0, 0.5, 1.0]
+    assert segment.data["content_type"] == "audio/ogg"
+    assert segment.data["info"]["size"] == 1396
+
+
+def test_message_from_content_keeps_regular_audio_as_audio_segment() -> None:
+    message = message_from_content(
+        {
+            "msgtype": "m.audio",
+            "body": "recording.ogg",
+            "url": "mxc://example.org/recording",
+        }
+    )
+
+    assert message[0].type == "audio"
+
+
+def test_message_from_content_preserves_encrypted_voice_file() -> None:
+    encrypted_file = {
+        "url": "mxc://example.org/encrypted-voice",
+        "key": {"kty": "oct", "k": "key"},
+        "iv": "iv",
+        "hashes": {"sha256": "hash"},
+        "v": "v2",
+    }
+    message = message_from_content(
+        {
+            "msgtype": "m.audio",
+            "body": "Voice message",
+            "org.matrix.msc1767.file": {
+                "name": "Voice message.ogg",
+                "mimetype": "audio/ogg",
+                "file": encrypted_file,
+            },
+            "org.matrix.msc3245.voice": {},
+        }
+    )
+
+    assert message[0].type == "voice"
+    assert message[0].data["url"] is None
+    assert message[0].data["file"] == encrypted_file
+
+
 def test_parse_text_notice_html_and_reply_content() -> None:
     payload = parse_message(
         Message(
