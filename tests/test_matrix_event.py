@@ -40,6 +40,12 @@ def test_room_message_event_exposes_reply_target() -> None:
                 "msgtype": "m.text",
                 "body": "> <@alice:example.org> quoted\n\nreply",
                 "m.relates_to": {"m.in_reply_to": {"event_id": "$target:example.org"}},
+                "format": "org.matrix.custom.html",
+                "formatted_body": (
+                    '<mx-reply><blockquote><a href="https://matrix.to/#/'
+                    '!other:example.org/$foreign:example.org">In reply to</a>'
+                    "</blockquote></mx-reply><p>reply</p>"
+                ),
             },
         )
     )
@@ -47,6 +53,56 @@ def test_room_message_event_exposes_reply_target() -> None:
     assert isinstance(event, RoomMessageEvent)
     assert event.reply == "$target:example.org"
     assert event.get_message().extract_plain_text() == "reply"
+
+
+def test_room_message_event_recovers_reply_from_mx_reply_fallback() -> None:
+    event = event_from_raw(
+        RawMatrixEvent(
+            type="m.room.message",
+            event_id="$reply:example.org",
+            sender="@alice:example.org",
+            content={
+                "msgtype": "m.text",
+                "body": "> <@bot:example.org> raster-image.jpg\n\nzssm",
+                "format": "org.matrix.custom.html",
+                "formatted_body": (
+                    '<mx-reply><blockquote><a href="https://matrix.to/#/'
+                    '!room:example.org/$target:example.org">In reply to</a>'
+                    "</blockquote></mx-reply><p>zssm</p>"
+                ),
+            },
+        ),
+        room_id="!room:example.org",
+    )
+
+    assert isinstance(event, RoomMessageEvent)
+    assert event.reply == "$target:example.org"
+    assert event.content["body"] == "zssm"
+    assert event.content["formatted_body"] == "<p>zssm</p>"
+    assert event.get_message().extract_plain_text() == "zssm"
+
+
+def test_room_message_event_ignores_foreign_fallback_but_cleans_body() -> None:
+    event = event_from_raw(
+        RawMatrixEvent(
+            type="m.room.message",
+            content={
+                "msgtype": "m.text",
+                "body": "> <@alice:example.org> quoted\n\nzssm",
+                "format": "org.matrix.custom.html",
+                "formatted_body": (
+                    '<mx-reply><blockquote><a href="https://matrix.to/#/'
+                    '!other:example.org/$foreign:example.org">In reply to</a>'
+                    "</blockquote></mx-reply><p>zssm</p>"
+                ),
+            },
+        ),
+        room_id="!room:example.org",
+    )
+
+    assert event.reply is None
+    assert event.content["body"] == "zssm"
+    assert event.get_message().extract_plain_text() == "zssm"
 
 
 def test_notice_event_variants() -> None:
@@ -255,9 +311,7 @@ def test_event_from_raw_via_full_pipeline() -> None:
     sync = type_validate_python(SyncResponse, json.loads(body))
     raw = sync.rooms.join["!room:example.org"].timeline.events[0]
 
-    event = event_from_raw(
-        raw, room_id="!room:example.org", to_me=False
-    )
+    event = event_from_raw(raw, room_id="!room:example.org", to_me=False)
 
     assert isinstance(event, RoomMessageEvent)
     assert event.get_type() == "message"

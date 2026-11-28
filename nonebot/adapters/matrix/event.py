@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from html.parser import HTMLParser
 from typing import Any, Literal
 from typing_extensions import override
+from urllib.parse import unquote, urlsplit
 
 from nonebot.adapters import Event as BaseEvent
 
@@ -10,7 +12,52 @@ from pydantic import ConfigDict, Field, PrivateAttr
 
 from .api.model import RawMatrixEvent
 from .api.types import EventId, RoomId, UserId
-from .message import Message, MessageSegment, message_from_content
+from .message import (
+    MATRIX_HTML_FORMAT,
+    Message,
+    MessageSegment,
+    message_from_content,
+    strip_formatted_reply_fallback,
+    strip_reply_fallback,
+)
+
+
+class _MatrixReplyLinkParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self._reply_depth = 0
+        self.links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "mx-reply":
+            self._reply_depth += 1
+        elif self._reply_depth and tag == "a" and (href := dict(attrs).get("href")):
+            self.links.append(href)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "mx-reply" and self._reply_depth:
+            self._reply_depth -= 1
+
+
+def _reply_event_id_from_fallback(formatted_body: str, room_id: str) -> str | None:
+    parser = _MatrixReplyLinkParser()
+    parser.feed(formatted_body)
+    for link in parser.links:
+        try:
+            parsed = urlsplit(link)
+        except ValueError:
+            continue
+        if parsed.scheme != "https" or parsed.hostname != "matrix.to":
+            continue
+        try:
+            room_and_event = parsed.fragment.split("?", 1)[0].lstrip("/").split("/", 1)
+            linked_room_id, event_id = (unquote(part) for part in room_and_event)
+        except ValueError:
+            continue
+        if linked_room_id == room_id and event_id.startswith("$"):
+            return event_id
+    return None
+
 
 EventType = Literal["message", "notice", "meta"]
 
@@ -214,10 +261,32 @@ def event_from_raw(
         in_reply_to = (
             relates_to.get("m.in_reply_to") if isinstance(relates_to, dict) else None
         )
-        if isinstance(in_reply_to, dict) and isinstance(
-            in_reply_to.get("event_id"), str
-        ):
-            data["reply"] = in_reply_to["event_id"]
+        reply_id = (
+            in_reply_to.get("event_id")
+            if isinstance(in_reply_to, dict)
+            and isinstance(in_reply_to.get("event_id"), str)
+            else None
+        )
+        content = dict(data.get("content", {}))
+        if reply_id is None and content.get("format") == MATRIX_HTML_FORMAT:
+            formatted_body = content.get("formatted_body")
+            current_room_id = data.get("room_id")
+            if isinstance(formatted_body, str) and current_room_id is not None:
+                reply_id = _reply_event_id_from_fallback(
+                    formatted_body, str(current_room_id)
+                )
+
+        body = content.get("body")
+        if isinstance(body, str) and body.startswith("> <@"):
+            content["body"] = strip_reply_fallback(body)
+            formatted_body = content.get("formatted_body")
+            if isinstance(formatted_body, str):
+                content["formatted_body"] = strip_formatted_reply_fallback(
+                    formatted_body
+                )
+            data["content"] = content
+        if reply_id is not None:
+            data["reply"] = reply_id
     data["to_me"] = to_me
     event_class = event_classes.get(raw.type, UnknownRoomEvent)
     return event_class.model_validate(data)

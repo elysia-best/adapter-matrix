@@ -147,6 +147,65 @@ def test_to_me_detects_room_mention(dummy_bot: DummyBot) -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_decrypts_private_reply_and_sets_event_reply(
+    dummy_bot: DummyBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handled_events: list[Event] = []
+
+    class CryptoStub:
+        async def handle_verification_event(
+            self, raw: RawMatrixEvent, room_id: str
+        ) -> bool:
+            return False
+
+        async def decrypt_room_event(
+            self, raw: RawMatrixEvent, *, room_id: str
+        ) -> RawMatrixEvent:
+            assert room_id == "!room:example.org"
+            return RawMatrixEvent.model_validate(
+                {
+                    "type": "m.room.message",
+                    "event_id": "$reply:example.org",
+                    "sender": "@alice:example.org",
+                    "room_id": room_id,
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "> <@bot:example.org> raster-image.jpg\n\nzssm",
+                        "format": "org.matrix.custom.html",
+                        "formatted_body": (
+                            '<mx-reply><blockquote><a href="https://matrix.to/#/'
+                            '!room:example.org/$target:example.org">In reply to</a>'
+                            "</blockquote></mx-reply><p>zssm</p>"
+                        ),
+                    },
+                }
+            )
+
+    async def handle_event(event: Event) -> None:
+        handled_events.append(event)
+
+    dummy_bot.crypto = CryptoStub()
+    monkeypatch.setattr(dummy_bot, "handle_event", handle_event)
+    await dummy_bot.adapter._dispatch_room_event(
+        dummy_bot,
+        RawMatrixEvent(
+            type="m.room.encrypted",
+            event_id="$encrypted-reply:example.org",
+            sender="@alice:example.org",
+            content={"algorithm": "m.megolm.v1.aes-sha2"},
+        ),
+        room_id="!room:example.org",
+    )
+
+    assert len(handled_events) == 1
+    event = handled_events[0]
+    assert event.reply == "$target:example.org"
+    assert event.content["body"] == "zssm"
+    assert event.get_message().extract_plain_text() == "zssm"
+
+
+@pytest.mark.asyncio
 async def test_dispatch_strips_standard_mention_before_command_parsing(
     dummy_bot: DummyBot,
     monkeypatch: pytest.MonkeyPatch,
