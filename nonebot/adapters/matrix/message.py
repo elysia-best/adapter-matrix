@@ -478,12 +478,18 @@ def build_edit_content(
     replacement = _build_message_content(_ensure_message(message))
     new_content = dict(replacement)
     new_content.pop("m.relates_to", None)
-    return {
+    content = {
         "msgtype": replacement.get("msgtype", "m.text"),
         "body": f"* {replacement.get('body', '')}",
         "m.new_content": new_content,
         "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
     }
+    if replacement.get("format") == MATRIX_HTML_FORMAT and isinstance(
+        replacement.get("formatted_body"), str
+    ):
+        content["format"] = MATRIX_HTML_FORMAT
+        content["formatted_body"] = f"* {replacement['formatted_body']}"
+    return content
 
 
 def _build_message_content(message: Message) -> dict[str, Any]:
@@ -560,6 +566,13 @@ def _build_message_payload(  # noqa: C901, PLR0912, PLR0915
             or media_segment.data.get("filename")
             or media_segment.type,
         }
+        filename = media_segment.data.get("filename")
+        if (
+            media_segment.type != VOICE_SEGMENT_TYPE
+            and filename
+            and content["body"] != filename
+        ):
+            content["filename"] = filename
         if media_segment.data.get("url") is not None:
             content["url"] = media_segment.data["url"]
         if media_segment.data.get("info"):
@@ -713,7 +726,12 @@ def message_from_content(content: dict[str, Any]) -> Message:  # noqa: PLR0911
             return Message(_voice_segment_from_content(content, body))
         segment_type = MSGTYPE_SEGMENT_MAP[msgtype]
         factory = getattr(MessageSegment, segment_type)
-        segment = factory(content.get("url", ""), body=body, info=content.get("info"))
+        segment = factory(
+            content.get("url", ""),
+            filename=content.get("filename"),
+            body=body,
+            info=content.get("info"),
+        )
         if isinstance(content.get("file"), dict):
             segment.data["file"] = dict(content["file"])
         return Message(segment)

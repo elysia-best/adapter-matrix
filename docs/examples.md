@@ -117,6 +117,32 @@ async def handle_redact(bot: Bot, event: MessageEvent):
     await bot.redact(event.room_id, event.event_id, reason="用户请求撤回")
 ```
 
+## 编辑消息
+
+编辑机器人自己发送的文本或富文本消息时，需要传入原始消息的事件 ID：
+
+```python
+from nonebot.adapters.matrix import MessageSegment
+
+await bot.edit_message(
+    event.room_id,
+    "$message-event-id",
+    MessageSegment.html("更新后的文字", "<strong>更新后的文字</strong>"),
+)
+```
+
+媒体消息可单独编辑说明文字，原图片或文件不会重新上传。传入 `caption=None` 可以移除说明并保留文件名：
+
+```python
+await bot.edit_media_caption(
+    event.room_id,
+    "$media-event-id",
+    "新的说明",
+    formatted_caption="<em>新的说明</em>",
+)
+await bot.edit_media_caption(event.room_id, "$media-event-id", None)
+```
+
 ## 输入状态
 
 ```python

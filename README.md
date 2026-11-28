@@ -289,9 +289,14 @@ async def handle_img_send():
 await bot.react(event.room_id, event.event_id, "👍")
 await bot.set_typing_state(event.room_id, typing=True, timeout=5000)
 await bot.mark_read(event.room_id, event.event_id)
+await bot.edit_message(event.room_id, message_event_id, "更新后的消息")
+await bot.edit_media_caption(event.room_id, media_event_id, "新的说明")
+await bot.edit_media_caption(event.room_id, media_event_id, None)  # 清除说明，保留文件名
 await bot.redact(event.room_id, event.event_id, reason="handled")
 await bot.join_room("!roomid:example.org", reason="Auto-joined")
 ```
+
+`edit_message` 和 `edit_media_caption` 仅能编辑机器人自己发送的原始消息；编辑媒体说明不会重新上传媒体。使用 `redact` 撤回消息。
 
 ### 自动接受邀请
 

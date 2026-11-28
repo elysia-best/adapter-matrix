@@ -74,6 +74,26 @@ async def test_send_event_url_encodes_matrix_ids(dummy_bot: DummyBot) -> None:
 
 
 @pytest.mark.asyncio
+async def test_redact_message_uses_redaction_endpoint(dummy_bot: DummyBot) -> None:
+    dummy_bot.adapter.content = b'{"event_id":"$redaction:example.org"}'
+
+    response = await dummy_bot.redact(
+        "!room:example.org",
+        "$message:example.org",
+        reason="handled",
+        txn_id="redact-txn",
+    )
+
+    request = dummy_bot.adapter.request_calls[-1]
+    assert request.method == "PUT"
+    assert str(request.url).endswith(
+        "/rooms/%21room%3Aexample.org/redact/%24message%3Aexample.org/redact-txn"
+    )
+    assert request.json == {"reason": "handled"}
+    assert response.event_id == "$redaction:example.org"
+
+
+@pytest.mark.asyncio
 async def test_media_upload_uses_raw_content(dummy_bot: DummyBot) -> None:
     dummy_bot.adapter.content = b'{"content_uri":"mxc://example.org/media"}'
 

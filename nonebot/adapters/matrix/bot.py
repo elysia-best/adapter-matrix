@@ -18,6 +18,7 @@ from .api import (
     ApiClient,
     EventIdResponse,
     JoinRoomResponse,
+    RawMatrixEvent,
     UploadResponse,
     WhoamiResponse,
 )
@@ -27,7 +28,13 @@ from .crypto.attachments import encrypt_attachment
 from .crypto.primitives import MEGOLM_ALGORITHM
 from .crypto.types import CryptoError
 from .event import Event, MessageEvent
-from .message import add_reply_fallback, build_message_content, get_reply_event_id
+from .message import (
+    MATRIX_HTML_FORMAT,
+    add_reply_fallback,
+    build_edit_content,
+    build_message_content,
+    get_reply_event_id,
+)
 from .room import Room
 
 if TYPE_CHECKING:
@@ -140,6 +147,129 @@ class Bot(BaseBot, ApiClient):
         return await self.send_event(
             room_id=room_id, event_type="m.room.message", txn_id=txn_id, content=content
         )
+
+    async def edit_message(
+        self,
+        room_id: RoomIdentifier,
+        event_id: EventId | str,
+        message: str | BaseMessage | BaseMessageSegment,
+        *,
+        txn_id: str | None = None,
+    ) -> EventIdResponse:
+        """Edit a message sent by this bot."""
+        target = await self._get_edit_target(room_id, event_id)
+        content = build_edit_content(message, str(event_id))
+        new_content = content["m.new_content"]
+        mentions = new_content.get("m.mentions")
+        if isinstance(mentions, dict):
+            previous_mentions = target.content.get("m.mentions")
+            previous_mentions = (
+                previous_mentions if isinstance(previous_mentions, dict) else {}
+            )
+            previous_user_ids = previous_mentions.get("user_ids", [])
+            if not isinstance(previous_user_ids, list):
+                previous_user_ids = []
+            previous_user_ids = {
+                user_id for user_id in previous_user_ids if isinstance(user_id, str)
+            }
+            new_mentions: dict[str, Any] = {}
+            user_ids = mentions.get("user_ids", [])
+            if not isinstance(user_ids, list):
+                user_ids = []
+            new_user_ids = sorted(
+                {user_id for user_id in user_ids if isinstance(user_id, str)}
+                - previous_user_ids
+            )
+            if new_user_ids:
+                new_mentions["user_ids"] = new_user_ids
+            if mentions.get("room") and not previous_mentions.get("room"):
+                new_mentions["room"] = True
+            if new_mentions:
+                content["m.mentions"] = new_mentions
+        return await self.send_event(
+            room_id=room_id,
+            event_type="m.room.message",
+            txn_id=txn_id or make_txn_id(),
+            content=content,
+        )
+
+    async def edit_media_caption(
+        self,
+        room_id: RoomIdentifier,
+        event_id: EventId | str,
+        caption: str | None,
+        *,
+        formatted_caption: str | None = None,
+        txn_id: str | None = None,
+    ) -> EventIdResponse:
+        """Edit or remove the caption of a media message sent by this bot."""
+        target = await self._get_edit_target(room_id, event_id)
+        content = target.content
+        if content.get("msgtype") not in {"m.image", "m.file", "m.audio", "m.video"}:
+            raise ValueError("Target event is not a supported media message")  # noqa: TRY003, EM101
+
+        replacement = dict(content)
+        replacement.pop("m.relates_to", None)
+        replacement.pop("m.new_content", None)
+        filename = replacement.get("filename")
+        voice_file = replacement.get("org.matrix.msc1767.file")
+        is_voice = isinstance(voice_file, dict)
+        if not isinstance(filename, str):
+            filename = (
+                voice_file.get("name") if is_voice else replacement.get("body", "")
+            )
+        if not isinstance(filename, str):
+            filename = replacement.get("body", "")
+        if caption is None:
+            replacement["body"] = filename
+            replacement.pop("filename", None)
+        else:
+            replacement["body"] = caption
+            if not is_voice:
+                replacement["filename"] = filename
+        if formatted_caption is None:
+            replacement.pop("format", None)
+            replacement.pop("formatted_body", None)
+        else:
+            replacement["format"] = MATRIX_HTML_FORMAT
+            replacement["formatted_body"] = formatted_caption
+        if is_voice:
+            replacement["org.matrix.msc1767.text"] = replacement["body"]
+
+        fallback_body = caption if caption is not None else replacement["body"]
+        edit_content = {
+            **replacement,
+            "body": f"* {fallback_body}",
+            "m.new_content": replacement,
+            "m.relates_to": {"rel_type": "m.replace", "event_id": str(event_id)},
+        }
+        # Keep existing mentions in m.new_content without notifying again.
+        edit_content.pop("m.mentions", None)
+        return await self.send_event(
+            room_id=room_id,
+            event_type="m.room.message",
+            txn_id=txn_id or make_txn_id(),
+            content=edit_content,
+        )
+
+    async def _get_edit_target(
+        self, room_id: RoomIdentifier, event_id: EventId | str
+    ) -> RawMatrixEvent:
+        target = await self.get_room_event(room_id=room_id, event_id=event_id)
+        if target.type == "m.room.encrypted":
+            if self.crypto is None:
+                raise CryptoError("Cannot edit an encrypted event without E2EE")  # noqa: TRY003, EM101
+            target = await self.crypto.decrypt_room_event(target, room_id=str(room_id))
+            if target is None:
+                raise CryptoError("Cannot decrypt the edit target event")  # noqa: TRY003, EM101
+        if target.type != "m.room.message":
+            raise ValueError("Only m.room.message events can be edited")  # noqa: TRY003, EM101
+        if target.sender != self.user_id:
+            raise ValueError("Only messages sent by this bot can be edited")  # noqa: TRY003, EM101
+        relation = target.content.get("m.relates_to")
+        if isinstance(relation, dict) and relation.get("rel_type") == "m.replace":
+            raise ValueError("An edit event cannot be edited")  # noqa: TRY003, EM101
+        return target
 
     def encryption(self) -> CryptoEngine:
         if self.crypto is None or not self.crypto.ready:

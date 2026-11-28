@@ -13,6 +13,8 @@ Bot 是 Matrix 适配器的核心类，继承自 NoneBot 的 ``Bot`` 基类和 A
    - :meth:`Bot.send` — 标准消息发送，自动处理加密。
    - :meth:`Bot.send_to` — 向指定房间发送消息。
    - :meth:`Bot.send_event` — 发送任意类型的房间事件。
+   - :meth:`Bot.edit_message` — 编辑机器人发送的文本或富文本消息。
+   - :meth:`Bot.edit_media_caption` — 编辑或清除机器人发送的媒体说明文字。
 
 房间操作
    - :meth:`Bot.join_room` — 加入房间。
@@ -79,9 +81,39 @@ Bot 是 Matrix 适配器的核心类，继承自 NoneBot 的 ``Bot`` 基类和 A
      * **key** -- 反应 key，如 ``"👍"``。
      * **txn_id** -- 事务 ID（可选，默认自动生成）。
 
+.. automethod:: Bot.edit_message
+
+   编辑机器人自己发送的原始 ``m.room.message`` 事件，支持文本和富文本。
+   目标事件必须是原始消息，不能是他人发送的消息、非消息事件或另一条编辑事件。
+
+   参数：
+     * **room_id** -- 房间 ID。
+     * **event_id** -- 要编辑的原始消息事件 ID。
+     * **message** -- 新消息内容：字符串 / ``Message`` / ``MessageSegment``。
+     * **txn_id** -- 事务 ID（可选，默认自动生成）。
+
+   返回：
+     ``EventIdResponse`` -- 包含编辑事件的 ``event_id``。
+
+.. automethod:: Bot.edit_media_caption
+
+   编辑机器人自己发送的图片、文件、音频或视频消息的说明文字。该方法保留原媒体，
+   只更新说明文字；传入 ``caption=None`` 可清除说明并保留文件名。富文本说明可同时
+   传入纯文本 ``caption`` 和 HTML ``formatted_caption``。
+
+   参数：
+     * **room_id** -- 房间 ID。
+     * **event_id** -- 媒体消息事件 ID。
+     * **caption** -- 新说明文字；传 ``None`` 清除说明。
+     * **formatted_caption** -- HTML 格式说明（可选）。
+     * **txn_id** -- 事务 ID（可选，默认自动生成）。
+
+   返回：
+     ``EventIdResponse`` -- 包含编辑事件的 ``event_id``。
+
 .. automethod:: Bot.redact
 
-   撤回（redact）指定事件。
+   删除（redact）指定事件。Matrix 通过发送 redaction 事件撤回消息；是否允许撤回由 homeserver 权限决定。
 
    参数：
      * **room_id** -- 房间 ID。

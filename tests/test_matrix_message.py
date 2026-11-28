@@ -118,6 +118,162 @@ async def test_send_reply_fetches_target_and_adds_fallback(
 
 
 @pytest.mark.asyncio
+async def test_edit_message_builds_replacement_and_validates_author(
+    dummy_bot: DummyBot,
+) -> None:
+    dummy_bot._encryption_states["!room:example.org"] = None
+    dummy_bot.adapter.responses = [
+        (
+            200,
+            b'{"type":"m.room.message","event_id":"$old:example.org",'
+            b'"sender":"@bot:example.org","content":{"msgtype":"m.text",'
+            b'"body":"old"}}',
+        ),
+        (200, b'{"event_id":"$edit:example.org"}'),
+    ]
+
+    response = await dummy_bot.edit_message(
+        "!room:example.org",
+        "$old:example.org",
+        MessageSegment.html("new", "<strong>new</strong>"),
+        txn_id="edit-txn",
+    )
+
+    target_request, send_request = dummy_bot.adapter.request_calls[-2:]
+    assert target_request.method == "GET"
+    assert send_request.url.raw_path.endswith("/send/m.room.message/edit-txn")
+    assert send_request.json == {
+        "msgtype": "m.text",
+        "body": "* new",
+        "m.new_content": {
+            "msgtype": "m.text",
+            "body": "new",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<strong>new</strong>",
+        },
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$old:example.org"},
+        "format": "org.matrix.custom.html",
+        "formatted_body": "* <strong>new</strong>",
+    }
+    assert response.event_id == "$edit:example.org"
+
+    dummy_bot.adapter.responses = [
+        (
+            200,
+            b'{"type":"m.room.message","event_id":"$other:example.org",'
+            b'"sender":"@alice:example.org","content":{"msgtype":"m.text",'
+            b'"body":"old"}}',
+        )
+    ]
+    with pytest.raises(ValueError, match="Only messages sent by this bot"):
+        await dummy_bot.edit_message("!room:example.org", "$other:example.org", "new")
+
+
+@pytest.mark.asyncio
+async def test_edit_message_notifies_only_new_mentions(dummy_bot: DummyBot) -> None:
+    dummy_bot._encryption_states["!room:example.org"] = None
+    dummy_bot.adapter.responses = [
+        (
+            200,
+            b'{"type":"m.room.message","event_id":"$old:example.org",'
+            b'"sender":"@bot:example.org","content":{"msgtype":"m.text",'
+            b'"body":"old","m.mentions":{"user_ids":["@alice:example.org"]}}}',
+        ),
+        (200, b'{"event_id":"$edit:example.org"}'),
+    ]
+
+    await dummy_bot.edit_message(
+        "!room:example.org",
+        "$old:example.org",
+        Message(
+            [
+                MessageSegment.mention_user("@alice:example.org", "Alice"),
+                MessageSegment.mention_user("@bob:example.org", "Bob"),
+            ]
+        ),
+    )
+
+    edit = dummy_bot.adapter.request_calls[-1].json
+    assert edit["m.new_content"]["m.mentions"] == {
+        "user_ids": ["@alice:example.org", "@bob:example.org"]
+    }
+    assert edit["m.mentions"] == {"user_ids": ["@bob:example.org"]}
+
+
+@pytest.mark.asyncio
+async def test_edit_media_caption_preserves_media_and_can_clear_caption(
+    dummy_bot: DummyBot,
+) -> None:
+    dummy_bot._encryption_states["!room:example.org"] = None
+    dummy_bot.adapter.responses = [
+        (
+            200,
+            b'{"type":"m.room.message","event_id":"$image:example.org",'
+            b'"sender":"@bot:example.org","content":{"msgtype":"m.image",'
+            b'"body":"old caption","filename":"photo.png",'
+            b'"url":"mxc://example.org/image",'
+            b'"info":{"mimetype":"image/png"},"m.mentions":{"user_ids":'
+            b'["@alice:example.org"]}}}',
+        ),
+        (200, b'{"event_id":"$edit:example.org"}'),
+    ]
+
+    await dummy_bot.edit_media_caption(
+        "!room:example.org",
+        "$image:example.org",
+        "new caption",
+        formatted_caption="<b>new caption</b>",
+        txn_id="caption-txn",
+    )
+
+    edit_request = dummy_bot.adapter.request_calls[-1]
+    assert edit_request.json["m.new_content"] == {
+        "msgtype": "m.image",
+        "body": "new caption",
+        "filename": "photo.png",
+        "url": "mxc://example.org/image",
+        "info": {"mimetype": "image/png"},
+        "m.mentions": {"user_ids": ["@alice:example.org"]},
+        "format": "org.matrix.custom.html",
+        "formatted_body": "<b>new caption</b>",
+    }
+    assert edit_request.json["body"] == "* new caption"
+    assert "m.mentions" not in edit_request.json
+
+    dummy_bot.adapter.responses = [
+        (
+            200,
+            b'{"type":"m.room.message","event_id":"$image:example.org",'
+            b'"sender":"@bot:example.org","content":{"msgtype":"m.image",'
+            b'"body":"old caption","filename":"photo.png",'
+            b'"url":"mxc://example.org/image"}}',
+        ),
+        (200, b'{"event_id":"$edit:example.org"}'),
+    ]
+    await dummy_bot.edit_media_caption("!room:example.org", "$image:example.org", None)
+    cleared = dummy_bot.adapter.request_calls[-1].json
+    assert cleared["body"] == "* photo.png"
+    assert cleared["m.new_content"]["body"] == "photo.png"
+    assert "filename" not in cleared["m.new_content"]
+    assert "formatted_body" not in cleared["m.new_content"]
+
+
+@pytest.mark.asyncio
+async def test_edit_media_caption_rejects_non_media(dummy_bot: DummyBot) -> None:
+    dummy_bot._encryption_states["!room:example.org"] = None
+    dummy_bot.adapter.content = (
+        b'{"type":"m.room.message","event_id":"$text:example.org",'
+        b'"sender":"@bot:example.org","content":{"msgtype":"m.text",'
+        b'"body":"text"}}'
+    )
+
+    with pytest.raises(ValueError, match="not a supported media message"):
+        await dummy_bot.edit_media_caption(
+            "!room:example.org", "$text:example.org", "caption"
+        )
+
+
+@pytest.mark.asyncio
 async def test_media_segment_uploads_before_send(dummy_bot: DummyBot) -> None:
     dummy_bot.adapter.content = b'{"content_uri":"mxc://example.org/image"}'
 
@@ -135,6 +291,31 @@ async def test_media_segment_uploads_before_send(dummy_bot: DummyBot) -> None:
     assert payload["msgtype"] == "m.image"
     assert payload["url"] == "mxc://example.org/image"
     assert payload["info"]["mimetype"] == "image/png"
+
+
+def test_media_caption_keeps_distinct_filename() -> None:
+    content = parse_message(
+        MessageSegment.image(
+            "mxc://example.org/image", filename="photo.png", body="caption"
+        )
+    )
+
+    assert content["body"] == "caption"
+    assert content["filename"] == "photo.png"
+
+
+def test_media_message_parsing_keeps_distinct_filename() -> None:
+    message = message_from_content(
+        {
+            "msgtype": "m.image",
+            "body": "caption",
+            "filename": "photo.png",
+            "url": "mxc://example.org/image",
+        }
+    )
+
+    assert message[0].data["body"] == "caption"
+    assert message[0].data["filename"] == "photo.png"
 
 
 @pytest.mark.asyncio
